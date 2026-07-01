@@ -1,0 +1,22 @@
+{
+  "selection": {
+    "best_model": "rf",
+    "best_params": {
+      "clf__n_estimators": 500,
+      "clf__min_samples_split": 2,
+      "clf__min_samples_leaf": 1,
+      "clf__max_depth": 16
+    },
+    "val_pr_auc": 0.8873138917774129,
+    "threshold": {
+      "thr": 0.27,
+      "fbeta": 0.8912768645002725,
+      "precision": 0.7704918032744782,
+      "recall": 0.9276315789412657
+    }
+  },
+  "test_metrics": {
+    "roc_auc": 0.9894062078272604,
+    "average_precision": 0.9615360513682712
+  }
+}
