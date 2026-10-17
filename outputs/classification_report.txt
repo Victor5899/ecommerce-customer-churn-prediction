@@ -1,12 +1,21 @@
-Best model: rf
+Best model: rf (Random Forest)
 Best params: {'clf__n_estimators': 500, 'clf__min_samples_split': 2, 'clf__min_samples_leaf': 1, 'clf__max_depth': 16}
-Tuned threshold: {'thr': 0.27, 'fbeta': 0.8912768645002725, 'precision': 0.7704918032744782, 'recall': 0.9276315789412657}
+Selection criterion: mean_cv_average_precision = 0.8734 (std 0.0177, 3-fold grouped stratified CV on training data)
+Random seed: 42
+
+Data: 5630 raw rows, 556 identical duplicate records removed, 0 conflicting-label groups (policy: keep_grouped), 5074 rows used.
+
+Decision threshold: 0.25 (maximise F2 on the validation partition subject to precision >= 0.55; constraint satisfied: True)
+Validation at threshold: precision=0.738 recall=0.919 F2=0.876 PR-AUC=0.932
+
+Test set (1015 rows, 168 churners), threshold 0.25:
+ROC-AUC=0.987 PR-AUC=0.945
 
               precision    recall  f1-score   support
 
-           0      0.985     0.959     0.972       936
-           1      0.822     0.926     0.871       190
+           0      0.988     0.942     0.964       847
+           1      0.763     0.940     0.843       168
 
-    accuracy                          0.954      1126
-   macro avg      0.904     0.943     0.922      1126
-weighted avg      0.957     0.954     0.955      1126
+    accuracy                          0.942      1015
+   macro avg      0.875     0.941     0.904      1015
+weighted avg      0.950     0.942     0.944      1015

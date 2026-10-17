@@ -1,22 +1,347 @@
 {
-  "selection": {
-    "best_model": "rf",
-    "best_params": {
+  "schema_version": 2,
+  "created_at_utc": "2026-10-17T12:01:01+00:00",
+  "random_seed": 42,
+  "environment": {
+    "python": "3.9.6",
+    "scikit_learn": "1.6.1",
+    "xgboost": "2.1.4",
+    "pandas": "2.3.3",
+    "numpy": "2.0.2"
+  },
+  "data": {
+    "source": "data/E Commerce Dataset.xlsx",
+    "sheet": "E Comm",
+    "target": "Churn",
+    "excluded_columns": [
+      "CustomerID"
+    ],
+    "n_raw_rows": 5630,
+    "n_rows_after_deduplication": 5074,
+    "deduplication": {
+      "excluded_from_identity": [
+        "CustomerID",
+        "Churn"
+      ],
+      "missing_values_compare_equal": true,
+      "n_rows": 5630,
+      "n_unique_feature_records": 5074,
+      "n_rows_in_duplicate_groups": 1112,
+      "n_duplicate_groups": 556,
+      "group_size_distribution": {
+        "1": 4518,
+        "2": 556
+      },
+      "n_redundant_identical_records": 556,
+      "n_conflicting_label_groups": 0,
+      "n_rows_in_conflicting_groups": 0,
+      "customer_id_unique": true,
+      "id_gap_within_duplicate_groups": {
+        "most_common_gap": 1470,
+        "groups_with_most_common_gap": 546,
+        "n_distinct_gaps": 6
+      },
+      "conflict_policy": "keep_grouped",
+      "n_removed_identical_records": 556,
+      "n_removed_conflicting_records": 0,
+      "n_rows_after_deduplication": 5074,
+      "churn_rate_before": 0.16838365896980462,
+      "churn_rate_after": 0.165746945210879
+    },
+    "split": {
+      "method": "stratified split of identical-feature-record groups (no identical feature record appears in two partitions)",
+      "test_size": 0.2,
+      "validation_size_of_remaining": 0.2,
+      "partitions": {
+        "train": {
+          "n_rows": 3247,
+          "n_positive": 538,
+          "churn_rate": 0.16569140745303357
+        },
+        "validation": {
+          "n_rows": 812,
+          "n_positive": 135,
+          "churn_rate": 0.16625615763546797
+        },
+        "test": {
+          "n_rows": 1015,
+          "n_positive": 168,
+          "churn_rate": 0.16551724137931034
+        }
+      },
+      "shared_feature_records_between_partitions": {
+        "train_validation": 0,
+        "train_test": 0,
+        "validation_test": 0
+      }
+    }
+  },
+  "features": {
+    "features": [
+      "Tenure",
+      "PreferredLoginDevice",
+      "CityTier",
+      "WarehouseToHome",
+      "PreferredPaymentMode",
+      "Gender",
+      "HourSpendOnApp",
+      "NumberOfDeviceRegistered",
+      "PreferedOrderCat",
+      "SatisfactionScore",
+      "MaritalStatus",
+      "NumberOfAddress",
+      "Complain",
+      "OrderAmountHikeFromlastYear",
+      "CouponUsed",
+      "OrderCount",
+      "DaySinceLastOrder",
+      "CashbackAmount"
+    ],
+    "numeric": [
+      "Tenure",
+      "CityTier",
+      "WarehouseToHome",
+      "HourSpendOnApp",
+      "NumberOfDeviceRegistered",
+      "SatisfactionScore",
+      "NumberOfAddress",
+      "Complain",
+      "OrderAmountHikeFromlastYear",
+      "CouponUsed",
+      "OrderCount",
+      "DaySinceLastOrder",
+      "CashbackAmount"
+    ],
+    "categorical": [
+      "PreferredLoginDevice",
+      "PreferredPaymentMode",
+      "Gender",
+      "PreferedOrderCat",
+      "MaritalStatus"
+    ],
+    "categories": {
+      "PreferredLoginDevice": [
+        "Computer",
+        "Mobile Phone",
+        "Phone"
+      ],
+      "PreferredPaymentMode": [
+        "CC",
+        "COD",
+        "Cash on Delivery",
+        "Credit Card",
+        "Debit Card",
+        "E wallet",
+        "UPI"
+      ],
+      "Gender": [
+        "Female",
+        "Male"
+      ],
+      "PreferedOrderCat": [
+        "Fashion",
+        "Grocery",
+        "Laptop & Accessory",
+        "Mobile",
+        "Mobile Phone",
+        "Others"
+      ],
+      "MaritalStatus": [
+        "Divorced",
+        "Married",
+        "Single"
+      ]
+    }
+  },
+  "model_selection": {
+    "criterion": "mean_cv_average_precision",
+    "description": "Highest mean cross-validated average precision (PR-AUC) on the training partition. Validation and test data are not used.",
+    "cv": "StratifiedGroupKFold(n_splits=3, shuffle=True, random_state=42)",
+    "cv_folds": 3,
+    "n_iter": 20,
+    "selected_model": "rf",
+    "selected_model_name": "Random Forest",
+    "selected_params": {
       "clf__n_estimators": 500,
       "clf__min_samples_split": 2,
       "clf__min_samples_leaf": 1,
       "clf__max_depth": 16
     },
-    "val_pr_auc": 0.8873138917774129,
-    "threshold": {
-      "thr": 0.27,
-      "fbeta": 0.8912768645002725,
-      "precision": 0.7704918032744782,
-      "recall": 0.9276315789412657
+    "cv_pr_auc_mean": 0.8733775578858269,
+    "cv_pr_auc_std": 0.01767382110496566,
+    "final_model_fit_on": "training partition only (validation is reserved for the threshold)"
+  },
+  "threshold": {
+    "value": 0.25,
+    "fbeta": 0.8757062146892656,
+    "precision": 0.7380952380952381,
+    "recall": 0.9185185185185185,
+    "beta": 2.0,
+    "min_precision": 0.55,
+    "constraint_satisfied": true,
+    "grid": {
+      "start": 0.05,
+      "stop": 0.9,
+      "n_values": 86
+    },
+    "objective": "maximise F2 on the validation partition subject to precision >= 0.55",
+    "tuned_on": "validation",
+    "rule": "predict churn when probability >= threshold"
+  },
+  "validation_metrics": {
+    "threshold": 0.25,
+    "n_samples": 812,
+    "n_positive": 135,
+    "roc_auc": 0.9810711745719132,
+    "pr_auc": 0.9324247526363622,
+    "accuracy": 0.9322660098522167,
+    "precision": 0.7380952380952381,
+    "recall": 0.9185185185185185,
+    "f1": 0.8184818481848185,
+    "beta": 2.0,
+    "fbeta": 0.8757062146892656,
+    "confusion_matrix": {
+      "tn": 633,
+      "fp": 44,
+      "fn": 11,
+      "tp": 124
     }
   },
   "test_metrics": {
-    "roc_auc": 0.9894062078272604,
-    "average_precision": 0.9615360513682712
+    "threshold": 0.25,
+    "n_samples": 1015,
+    "n_positive": 168,
+    "roc_auc": 0.9874205880699387,
+    "pr_auc": 0.9445550610701148,
+    "accuracy": 0.941871921182266,
+    "precision": 0.7632850241545893,
+    "recall": 0.9404761904761905,
+    "f1": 0.8426666666666667,
+    "beta": 2.0,
+    "fbeta": 0.8987485779294653,
+    "confusion_matrix": {
+      "tn": 798,
+      "fp": 49,
+      "fn": 10,
+      "tp": 158
+    }
+  },
+  "test_metrics_reference_threshold_0_5": {
+    "threshold": 0.5,
+    "n_samples": 1015,
+    "n_positive": 168,
+    "roc_auc": 0.9874205880699387,
+    "pr_auc": 0.9445550610701148,
+    "accuracy": 0.9477832512315271,
+    "precision": 0.9389312977099237,
+    "recall": 0.7321428571428571,
+    "f1": 0.822742474916388,
+    "beta": 2.0,
+    "fbeta": 0.7658779576587795,
+    "confusion_matrix": {
+      "tn": 839,
+      "fp": 8,
+      "fn": 45,
+      "tp": 123
+    }
+  },
+  "candidates": [
+    {
+      "model": "logreg",
+      "model_name": "Logistic Regression",
+      "best_params": {
+        "clf__solver": "saga",
+        "clf__penalty": "l2",
+        "clf__C": 0.0533669923120631
+      },
+      "n_iter": 20,
+      "cv_pr_auc_mean": 0.6901747777936021,
+      "cv_pr_auc_std": 0.03452439218004262,
+      "validation_threshold": 0.62,
+      "validation_roc_auc": 0.8873242518737349,
+      "validation_pr_auc": 0.705909479932776,
+      "validation_precision": 0.5674157303370787,
+      "validation_recall": 0.7481481481481481,
+      "validation_f1": 0.645367412140575,
+      "validation_fbeta": 0.7033426183844012,
+      "selected": false
+    },
+    {
+      "model": "rf",
+      "model_name": "Random Forest",
+      "best_params": {
+        "clf__n_estimators": 500,
+        "clf__min_samples_split": 2,
+        "clf__min_samples_leaf": 1,
+        "clf__max_depth": 16
+      },
+      "n_iter": 20,
+      "cv_pr_auc_mean": 0.8733775578858269,
+      "cv_pr_auc_std": 0.01767382110496566,
+      "validation_threshold": 0.25,
+      "validation_roc_auc": 0.9810711745719132,
+      "validation_pr_auc": 0.9324247526363622,
+      "validation_precision": 0.7380952380952381,
+      "validation_recall": 0.9185185185185185,
+      "validation_f1": 0.8184818481848185,
+      "validation_fbeta": 0.8757062146892656,
+      "selected": true
+    },
+    {
+      "model": "gb",
+      "model_name": "Gradient Boosting",
+      "best_params": {
+        "clf__subsample": 0.85,
+        "clf__n_estimators": 300,
+        "clf__max_depth": 3,
+        "clf__learning_rate": 0.1
+      },
+      "n_iter": 20,
+      "cv_pr_auc_mean": 0.8152011415330606,
+      "cv_pr_auc_std": 0.029129869971984558,
+      "validation_threshold": 0.17,
+      "validation_roc_auc": 0.9518463810930576,
+      "validation_pr_auc": 0.8330280003098478,
+      "validation_precision": 0.6574585635359116,
+      "validation_recall": 0.8814814814814815,
+      "validation_f1": 0.7531645569620253,
+      "validation_fbeta": 0.8252427184466019,
+      "selected": false
+    },
+    {
+      "model": "xgb",
+      "model_name": "XGBoost",
+      "best_params": {
+        "clf__subsample": 0.8,
+        "clf__n_estimators": 300,
+        "clf__max_depth": 7,
+        "clf__learning_rate": 0.1,
+        "clf__colsample_bytree": 1.0
+      },
+      "n_iter": 20,
+      "cv_pr_auc_mean": 0.8647054327320455,
+      "cv_pr_auc_std": 0.021962299800767922,
+      "validation_threshold": 0.13,
+      "validation_roc_auc": 0.9749111001695935,
+      "validation_pr_auc": 0.9395469356857051,
+      "validation_precision": 0.802547770700637,
+      "validation_recall": 0.9333333333333333,
+      "validation_f1": 0.863013698630137,
+      "validation_fbeta": 0.9038737446197992,
+      "selected": false
+    }
+  ],
+  "artifacts": {
+    "model_file": "best_model.joblib",
+    "model_sha256": "cba9d37585dc095b72c394b31a9516e052f862689eade4997a309e68172d8364",
+    "model_comparison": "model_comparison.csv",
+    "data_quality_report": "data_quality_report.json",
+    "removed_duplicates": "removed_duplicates.csv",
+    "plots": [
+      "roc_curve.png",
+      "pr_curve.png",
+      "confusion_matrix.png",
+      "feature_importance.png"
+    ]
   }
 }

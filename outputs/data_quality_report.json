@@ -1,0 +1,50 @@
+{
+  "feature_identity_columns": [
+    "Tenure",
+    "PreferredLoginDevice",
+    "CityTier",
+    "WarehouseToHome",
+    "PreferredPaymentMode",
+    "Gender",
+    "HourSpendOnApp",
+    "NumberOfDeviceRegistered",
+    "PreferedOrderCat",
+    "SatisfactionScore",
+    "MaritalStatus",
+    "NumberOfAddress",
+    "Complain",
+    "OrderAmountHikeFromlastYear",
+    "CouponUsed",
+    "OrderCount",
+    "DaySinceLastOrder",
+    "CashbackAmount"
+  ],
+  "excluded_from_identity": [
+    "CustomerID",
+    "Churn"
+  ],
+  "missing_values_compare_equal": true,
+  "n_rows": 5630,
+  "n_unique_feature_records": 5074,
+  "n_rows_in_duplicate_groups": 1112,
+  "n_duplicate_groups": 556,
+  "group_size_distribution": {
+    "1": 4518,
+    "2": 556
+  },
+  "n_redundant_identical_records": 556,
+  "n_conflicting_label_groups": 0,
+  "n_rows_in_conflicting_groups": 0,
+  "customer_id_unique": true,
+  "id_gap_within_duplicate_groups": {
+    "most_common_gap": 1470,
+    "groups_with_most_common_gap": 546,
+    "n_distinct_gaps": 6
+  },
+  "conflict_policy": "keep_grouped",
+  "n_removed_identical_records": 556,
+  "n_removed_conflicting_records": 0,
+  "n_rows_after_deduplication": 5074,
+  "churn_rate_before": 0.16838365896980462,
+  "churn_rate_after": 0.165746945210879
+}
