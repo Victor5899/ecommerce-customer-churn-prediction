@@ -146,29 +146,41 @@ For reference, the same model at the default threshold of 0.5 has 93.9% precisio
 
 # Streamlit Dashboard
 
+A multi-page Streamlit analytics app (sidebar navigation) built on the saved artifacts in `outputs/`. It never retrains the model. Charts are interactive [Altair](https://altair-viz.github.io/) charts (Altair ships with Streamlit, so no extra dependency) with tooltips on every bar. The sidebar shows the loaded model, its decision threshold, and whether `metrics.json` matches the model file (SHA-256).
+
+Historical churn is always calculated from the actual `Churn` labels. Model predictions are summarised separately and are never treated as outcomes.
+
+| Page | Purpose |
+|---|---|
+| **Executive Overview** | Historical record count and actual churn rate (raw and de-duplicated), next to the number and share of customers predicted to churn in the current scoring batch. Shows the churn distribution, actual churn rate by tenure, satisfaction score, complaint status and order count, and a short list of observations computed from the data. |
+| **Customer Analytics** | Explore any model feature for the historical dataset or the current scored batch. Filters cover tenure, city tier, order category and complaints, with missing values optionally included. Each feature gets a distribution chart (split by actual outcome when labels exist), an actual churn rate by segment, and median feature values for retained vs churned customers. Churn patterns are shown only when the source has a complete 0/1 `Churn` column. |
+| **Churn Prediction** | Batch scoring of CSV/XLSX uploads (see below). Shows a prediction summary for the current upload, configurable Low/Medium/High risk bands, a probability histogram with the decision threshold marked, and a risk list you can filter and sort. Downloads cover the full results or the filtered view. |
+| **Model Performance** | Saved held-out test metrics at the tuned threshold (precision, recall, F1, ROC-AUC, PR-AUC, accuracy) with an interactive confusion matrix and a reference comparison at 0.5. Cross-validation and validation results are on separate tabs, along with the candidate comparison and the saved plots. Missing or out-of-date artifacts produce a warning, and if the metadata fails its checks the results are hidden. |
+| **Data Quality** | Training-time findings: dataset size, missing values per column, the duplicate-removal report with the removed records (downloadable), the train/validation/test split, alternative category spellings found in the data, and known limitations. A separate tab holds checks on the current upload: missing values, duplicate rows and IDs, unseen categories and label availability. |
+
+### Batch prediction
+
 The dashboard scores a **batch** of customers from an uploaded file. It has no single-customer form and no real-time API.
 
 - Upload customer data as CSV or XLSX. For workbooks, the `E Comm` sheet is used when present (so the original dataset file works), a single-sheet workbook is read directly, and for other multi-sheet workbooks you choose the sheet.
 - Required columns are validated before prediction. Missing columns, non-numeric values in numeric columns, empty files and unreadable files produce an error message instead of a traceback.
-- `CustomerID` and `Churn` are never used as features. Extra columns are listed, ignored for prediction, and kept in the output.
+- `CustomerID` and `Churn` are never used as features. If the upload has a complete `Churn` column, its actual churn rate is reported separately from the predictions. Extra columns are listed, ignored for prediction, and kept in the output.
 - Missing values are imputed by the trained pipeline. Category values not seen during training are reported and encoded as "none of the known categories".
-- Results keep the original rows, order and identifiers, and add `Churn Prediction` (0/1 at the configured threshold) and `Churn Probability` (%).
-- Shows high/low risk counts and lets you download the results as CSV.
-- Shows the test metrics, the candidate model comparison, the confusion matrix, the feature importance, and the ROC and precision-recall curves.
+- Results keep the original rows, order and identifiers, and add `Churn Prediction` (0/1 at the configured threshold), `Churn Probability` (%) and `Risk Segment`.
+- Risk bands are for presentation only. By default the Medium band starts at the decision threshold, and moving the boundaries never changes `Churn Prediction`.
+- The last scored batch stays available on the other pages for the rest of the browser session.
 
-The model is cached with `st.cache_resource` and reloaded only when `best_model.joblib` changes.
+The model, metadata and historical dataset are cached (`st.cache_resource` / `st.cache_data`) and reloaded only when their files change. Uploaded files are parsed once per content hash.
 
-## Home Page
+### Screenshot checklist
 
-![Dashboard](screenshots/dashboard.png)
+The images in `screenshots/` predate this dashboard and the threshold/deduplication fixes. Retake them from a local run on the real dataset and saved artifacts:
 
----
-
-## Prediction Results
-
-![Prediction](screenshots/prediction.png)
-
-*Screenshots were taken before the threshold and deduplication fixes; current counts and metrics differ.*
+- [ ] Executive Overview: KPI cards, churn distribution, segment charts
+- [ ] Customer Analytics: filters expanded, `Tenure` and `CashbackAmount` charts
+- [ ] Churn Prediction: original workbook scored, risk histogram and filtered risk list
+- [ ] Model Performance: test-set tab with confusion matrix; cross-validation tab
+- [ ] Data Quality: training-data tab and current-upload tab
 
 ---
 
@@ -185,7 +197,8 @@ The Random Forest's impurity-based importances rank `Tenure` highest by a wide m
 ```
 ecommerce-customer-churn-prediction
 │
-├── app.py                     Streamlit dashboard (batch inference)
+├── app.py                     Streamlit entry point: cached loading, model checks, navigation
+├── .streamlit/config.toml     Dashboard theme
 ├── README.md
 ├── requirements.txt           Runtime dependencies
 ├── requirements-dev.txt       + pytest
@@ -199,6 +212,9 @@ ecommerce-customer-churn-prediction
 ├── src
 │   ├── utils.py               Loading, duplicate audit/deduplication, grouped split, JSON helpers
 │   ├── inference.py           File ingestion, input validation, threshold policy, scoring
+│   ├── dashboard.py           Dashboard calculations (actual vs predicted churn, segments, quality)
+│   ├── charts.py              Altair chart builders
+│   ├── dashboard_pages.py     Streamlit page renderers
 │   └── train_models.py        Training, model selection, threshold tuning, evaluation, artifacts
 │
 ├── tests                      pytest suite (synthetic fixtures + dashboard smoke tests)
@@ -268,6 +284,8 @@ python src/train_models.py --input "data/E Commerce Dataset.xlsx" --outdir /tmp/
 ```bash
 python -m streamlit run app.py
 ```
+
+Open http://localhost:8501 and use the sidebar to switch pages. The app needs `outputs/best_model.joblib` and `outputs/metrics.json` (run training first if they are missing). The historical pages also read `data/E Commerce Dataset.xlsx`.
 
 ---
 

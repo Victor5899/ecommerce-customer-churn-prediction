@@ -38,10 +38,19 @@ def app_with_upload(app_path, upload_path, upload_name):
         st.file_uploader = original
 
 
+PAGES = ["Executive Overview", "Customer Analytics", "Churn Prediction", "Model Performance",
+         "Data Quality"]
+
+
+def open_page(at, page: str):
+    at.sidebar.radio(key="page").set_value(page)
+    return at.run()
+
+
 def run_with_upload(path: Path, name: str):
     at = streamlit_testing.AppTest.from_function(
         app_with_upload, args=(str(APP), str(path), name), default_timeout=120)
-    return at.run()
+    return open_page(at.run(), "Churn Prediction")
 
 
 def texts(elements):
@@ -64,9 +73,39 @@ def test_original_workbook_upload_and_prediction():
 
     at.button[0].click().run()
     assert not at.exception and not at.error
-    metrics = {m.label: m.value for m in at.metric}
-    total = int(metrics["High Risk Customers"]) + int(metrics["Low Risk Customers"])
-    assert total == len(pd.read_excel(DATASET, sheet_name="E Comm"))
+    metrics = {m.label: int(m.value.replace(",", "")) for m in at.metric
+               if m.label in ("Customers scored", "Predicted to churn", "Predicted to stay")}
+    n_rows = len(pd.read_excel(DATASET, sheet_name="E Comm"))
+    assert metrics["Predicted to churn"] + metrics["Predicted to stay"] == n_rows
+    assert metrics["Customers scored"] == n_rows
+
+    # Predictions persist to other pages and never replace historical (actual) churn.
+    at = open_page(at, "Executive Overview")
+    assert not at.exception and not at.error
+    values = {m.label: m.value for m in at.metric}
+    assert values["Customers scored"] == f"{n_rows:,}"
+    assert values["Actual churn rate"] == f"{pd.read_excel(DATASET, sheet_name='E Comm')['Churn'].mean():.1%}"
+    at = open_page(at, "Data Quality")
+    assert not at.exception and not at.error
+
+
+@pytest.mark.parametrize("page", PAGES)
+def test_every_page_renders_without_errors(page):
+    at = open_page(streamlit_testing.AppTest.from_file(str(APP), default_timeout=120).run(), page)
+    assert not at.exception
+    assert not at.error
+
+
+def test_model_performance_shows_saved_test_metrics_and_threshold():
+    test = json.loads(METRICS.read_text())["test_metrics"]
+    at = open_page(streamlit_testing.AppTest.from_file(str(APP), default_timeout=120).run(),
+                   "Model Performance")
+    values = {}
+    for m in at.metric:  # the test-set tab renders before the validation tab
+        values.setdefault(m.label, m.value)
+    assert values["Decision threshold"] == f"{test['threshold']:.2f}"
+    assert values["Recall"] == f"{test['recall']:.1%}"
+    assert values["PR-AUC"] == f"{test['pr_auc']:.3f}"
 
 
 def test_missing_columns_show_streamlit_error(tmp_path):
