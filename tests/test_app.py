@@ -39,7 +39,7 @@ def app_with_upload(app_path, upload_path, upload_name):
 
 
 PAGES = ["Executive Overview", "Customer Analytics", "Churn Prediction", "Model Performance",
-         "Data Quality"]
+         "Data Quality", "Retention Intelligence"]
 
 
 def open_page(at, page: str):
@@ -87,6 +87,9 @@ def test_original_workbook_upload_and_prediction():
     assert values["Actual churn rate"] == f"{pd.read_excel(DATASET, sheet_name='E Comm')['Churn'].mean():.1%}"
     at = open_page(at, "Data Quality")
     assert not at.exception and not at.error
+    at = open_page(at, "Retention Intelligence")
+    assert not at.exception and not at.error
+    assert {"Eligible customers", "Selected customers", "Unspent budget"} <= {m.label for m in at.metric}
 
 
 @pytest.mark.parametrize("page", PAGES)

@@ -13,6 +13,7 @@ import streamlit as st
 import charts
 import dashboard as db
 import explainability as xai
+import retention as rt
 from inference import (
     CALIBRATED_COL, PREDICTION_COL, PROBABILITY_COL, DataValidationError, FeatureSchema,
     file_extension, prepare_features, resolve_sheet, score_prepared,
@@ -859,3 +860,258 @@ def _upload_quality(ctx: DashboardContext) -> None:
         with st.container(border=True):
             st.markdown("**Missing values in model features**")
             st.altair_chart(charts.missing_values_chart(q["missing"]))
+
+
+# --------------------------------------------------------------------------- #
+# F. Retention intelligence
+# --------------------------------------------------------------------------- #
+RETENTION_NOTE = (
+    "Suggested actions are heuristic rules based on observed customer features. They have not been "
+    "tested as treatments, and nothing on this page estimates customers retained or revenue saved. A "
+    "high rank means a high model score or more observed triggers; it does not mean the customer will churn.")
+PLAN_COLUMNS = [rt.PRIORITY_RANK_COL, rt.ROW_ID_COL, ID_COL, PROBABILITY_COL, CALIBRATED_COL,
+                PREDICTION_COL, rt.BAND_COL, *rt.PROFILE_FEATURES, rt.ACTION_COL, rt.REASON_COL,
+                rt.OTHER_ACTIONS_COL]
+
+
+def _csv(frame: pd.DataFrame) -> bytes:
+    return frame.to_csv(index=False).encode("utf-8")
+
+
+def _plan_columns(frame: pd.DataFrame, extra=()) -> list[str]:
+    return [c for c in PLAN_COLUMNS + list(extra) if c in frame.columns]
+
+
+def _plan_column_config() -> dict:
+    return {
+        PROBABILITY_COL: st.column_config.ProgressColumn(
+            "Model churn score", format="%.1f%%", min_value=0, max_value=100,
+            help="Uncalibrated model score. Planning bands and rankings use this score."),
+        CALIBRATED_COL: st.column_config.NumberColumn(
+            "Calibrated probability", format="%.1f%%",
+            help="Validation-calibrated estimate; shown for interpretation only."),
+        PREDICTION_COL: st.column_config.NumberColumn(
+            "Official prediction", help="1 = predicted to churn at the official decision threshold"),
+        rt.BAND_COL: st.column_config.TextColumn(
+            rt.BAND_COL, help="Planning only; independent of the official decision threshold."),
+    }
+
+
+def retention_intelligence(ctx: DashboardContext) -> None:
+    _page_header("Retention Intelligence",
+                 "Plan retention outreach for the current scored batch with transparent, configurable "
+                 "business rules. The model, its decision threshold and saved artifacts are not changed.")
+    st.markdown(
+        "1. **Planning risk bands** group customers by model churn score.\n"
+        "2. **Rules** suggest a next action from observed features (complaints, tenure, satisfaction, "
+        "days since last order).\n"
+        "3. **Priority ranking** orders customers by a documented policy.\n"
+        "4. **Budget planner** selects customers in rank order until the budget or contact limit is reached.\n"
+        "5. **What-if comparison** sets several planning scenarios side by side.")
+    st.caption(RETENTION_NOTE)
+
+    batch = _batch()
+    if batch is None or batch["results"].empty:
+        st.info("No file has been scored in this session. Score a file on **Churn Prediction** first; "
+                "this page reuses those scores and never re-runs the model.")
+        return
+    results = batch["results"]
+    st.caption(f"Batch: `{batch['filename']}` ({len(results):,} customers). {rt.identifier_note(results)}")
+    if CALIBRATED_COL not in results.columns:
+        st.info("Calibrated probabilities are unavailable for this batch, so only the model churn score is "
+                "shown. Rankings never use calibrated values, so they are unaffected.")
+    has_predictions = PREDICTION_COL in results.columns
+    if not has_predictions:
+        st.warning("Official predictions are unavailable because no verified decision threshold was "
+                   "loaded. Planning still works on the model score; 'predicted churners only' is disabled.")
+    missing_features = [c for c in rt.PROFILE_FEATURES if c not in results.columns]
+    if missing_features:
+        st.info(f"Not in this file: {', '.join(missing_features)}. Rules that need them are skipped.")
+
+    with st.expander("Planning settings: risk bands and rule thresholds"):
+        low_default, high_default = db.default_risk_bounds(ctx.threshold)
+        low, high = st.slider("Planning risk bands (model churn score, %)", 1, 99,
+                              (low_default, high_default), key="retention_bounds",
+                              help="Low < first value ≤ Medium < second value ≤ High. Planning only.")
+        c = st.columns(3)
+        cfg = rt.RuleConfig(
+            c[0].number_input("Short tenure: at most (months)", 0.0, 120.0, 2.0, 1.0),
+            c[1].number_input("Low satisfaction: score at most", 0.0, 5.0, 2.0, 1.0),
+            c[2].number_input("Inactivity: days since last order at least", 0.0, 365.0, 10.0, 1.0))
+    if low >= high:
+        st.warning("The two risk-band boundaries must differ. Move the slider handles apart.")
+        return
+    threshold_note = (f"Official predictions use the decision threshold of {ctx.threshold:.0%} and are "
+                      "not affected." if ctx.threshold is not None else "No official threshold is loaded.")
+    st.caption(f"Planning bands: Low < {low}% ≤ Medium < {high}% ≤ High. {threshold_note}")
+    plan = rt.build_action_plan(results, low, high, cfg)
+
+    tabs = st.tabs(["Prioritisation", "Suggested actions", "Budget planner", "What-if scenarios"])
+    with tabs[0]:
+        _retention_priorities(plan, has_predictions)
+    with tabs[1]:
+        _retention_actions(plan, cfg)
+    with tabs[2]:
+        selection, budget, cost = _retention_budget(plan, has_predictions)
+    with tabs[3]:
+        _retention_scenarios(plan, budget, cost)
+
+    st.subheader("Download the retention action plan")
+    export_source = selection if selection is not None else plan
+    d1, d2 = st.columns(2)
+    d1.download_button("Download full action plan (original file order)",
+                       _csv(rt.export_action_plan(export_source)), file_name="retention_action_plan.csv",
+                       mime="text/csv", on_click="ignore")
+    d2.download_button("Download selected customers (selection order)",
+                       _csv(rt.export_action_plan(selection, selected_only=True)) if selection is not None
+                       else b"", file_name="retention_selected_customers.csv", mime="text/csv",
+                       on_click="ignore", disabled=selection is None or not selection[rt.SELECTED_COL].any())
+    st.caption(f"Both files share one fixed column layout. `{rt.ROW_ID_COL}` is the row's position in the "
+               f"uploaded file and `{rt.ID_TYPE_COL}` states whether a unique `{ID_COL}` is available. "
+               "Eligibility, selection and cost columns reflect the budget planner settings; columns that do "
+               "not apply (for example, no calibrator) are left empty.")
+
+
+def _retention_priorities(plan: pd.DataFrame, has_predictions: bool) -> None:
+    st.caption(
+        "**Priority ranking policy:** planning risk band (High first), then the number of observed rule "
+        "triggers, then model churn score, then original file order. **Score ranking:** model churn score "
+        "only, ties in file order. Both are planning orders, not churn guarantees.")
+    f = st.columns([2, 3, 1.5, 1.5])
+    bands = f[0].multiselect("Planning risk bands", list(rt.RISK_BANDS), default=list(rt.RISK_BANDS))
+    present = [a for a in rt.ACTIONS if a in set(plan[rt.ACTION_COL])]
+    actions = f[1].multiselect("Suggested actions", present, default=present)
+    sort = f[2].selectbox("Order", ["priority", "score", "original"],
+                          format_func={"priority": "Priority rank", "score": "Model score rank",
+                                       "original": "Original file order"}.get)
+    predicted_only = f[3].checkbox("Official predicted churners only", disabled=not has_predictions,
+                                   key="retention_predicted_only")
+    view = rt.filter_plan(plan, bands, actions, predicted_only, sort)
+    st.caption(f"Showing {len(view):,} of {len(plan):,} customers.")
+    if view.empty:
+        st.info("No customers match these filters.")
+        return
+    st.dataframe(view[_plan_columns(view, [rt.SCORE_RANK_COL])], hide_index=True,
+                 column_config=_plan_column_config())
+    st.download_button("Download this view", _csv(view[_plan_columns(view, [rt.SCORE_RANK_COL])]),
+                       file_name="retention_priorities_filtered.csv", mime="text/csv", on_click="ignore")
+
+
+def _retention_actions(plan: pd.DataFrame, cfg: rt.RuleConfig) -> None:
+    left, right = st.columns([1, 1])
+    with left.container(border=True):
+        st.altair_chart(charts.action_mix_chart(rt.action_counts(plan), "Suggested next action (all customers)"))
+    with right:
+        st.markdown("**Rules, applied in this order**")
+        st.dataframe(rt.rules_table(cfg), hide_index=True)
+        st.caption("The first rule that applies sets the suggested action; other applicable actions are "
+                   "listed alongside it. Missing values never trigger a rule. No rule offers discounts: "
+                   "incentives need evidence of effect that this dataset does not provide.")
+    st.caption(f"Every suggestion is labelled “{rt.HEURISTIC_BASIS}”. {CAUSATION_NOTE}")
+
+
+def _retention_budget(plan: pd.DataFrame, has_predictions: bool):
+    st.caption("Enter your own campaign assumptions. The defaults are placeholders, not estimates; amounts "
+               "are in your own currency units.")
+    c = st.columns(3)
+    budget = c[0].number_input("Total campaign budget", min_value=0.0, value=1000.0, step=100.0)
+    limit = c[1].number_input("Maximum customers to contact (0 = no limit)", min_value=0, value=0, step=10)
+    strategy = c[2].selectbox("Selection strategy", list(rt.STRATEGIES), format_func=rt.STRATEGIES.get)
+    c = st.columns(3)
+    min_score = c[0].slider("Minimum model churn score (%)", 0, 100, 0, key="retention_min_score")
+    min_band = c[1].selectbox("Lowest eligible planning band", list(rt.RISK_BANDS), index=1)
+    predicted_only = c[2].checkbox("Only official predicted churners", disabled=not has_predictions)
+    per_action = st.toggle("Set a different cost for each suggested action")
+    if per_action:
+        present = [a for a in rt.ACTIONS if a in set(plan[rt.ACTION_COL])]
+        cols = st.columns(min(len(present), 3))
+        cost = {a: cols[i % len(cols)].number_input(f"Cost: {a}", min_value=0.0, value=10.0, step=1.0)
+                for i, a in enumerate(present)}
+    else:
+        cost = st.number_input("Cost per contacted customer", min_value=0.0, value=10.0, step=1.0)
+
+    scenario = rt.Scenario("Planner", budget, cost, int(limit) or None, min_score, min_band, strategy,
+                           predicted_only and has_predictions)
+    try:
+        selection, summary = rt.plan_scenario(plan, scenario)
+    except ValueError as exc:
+        st.warning(f"These settings cannot be planned: {exc}")
+        return None, budget, 10.0
+    costs = list(cost.values()) if isinstance(cost, dict) else [cost]
+    if budget == 0 and any(costs):
+        st.info("The budget is zero, so no customers with a non-zero cost can be selected.")
+    if not any(costs):
+        st.info("Every cost is zero, so the budget does not limit selection; only the contact limit does.")
+
+    m = st.columns(4)
+    m[0].metric("Eligible customers", f"{summary['Eligible']:,}")
+    m[1].metric("Selected customers", f"{summary['Selected']:,}")
+    m[2].metric("Estimated campaign cost", f"{summary['Estimated cost']:,.2f}")
+    m[3].metric("Unspent budget", f"{summary['Unspent budget']:,.2f}")
+    not_selected = summary["Eligible"] - summary["Selected"]
+    if not_selected:
+        st.caption(f"{not_selected:,} eligible customer(s) were not selected because the budget or contact "
+                   "limit was reached. Customers are taken strictly in rank order: selection stops at the "
+                   "first customer who does not fit, so nobody is skipped in favour of a lower rank.")
+    b = st.columns(3)
+    for slot, band in zip(b, rt.RISK_BANDS):
+        slot.metric(f"Selected: {band} band", f"{summary[f'{band} band']:,}")
+
+    left, right = st.columns([1, 1])
+    with left:
+        st.markdown("**Observed characteristics**")
+        st.dataframe(rt.selection_profile(selection), column_config={
+            c: st.column_config.NumberColumn(format="%.2f") for c in
+            ("Selected", "Eligible, not selected", "All scored")})
+        st.caption("Descriptive only: medians and shares of observed values; the model score and calibrated "
+                   "probability are model estimates.")
+    chosen = selection[selection[rt.SELECTED_COL]]
+    with right.container(border=True):
+        if chosen.empty:
+            st.caption("No customers are selected with these settings.")
+        else:
+            st.altair_chart(charts.action_mix_chart(rt.action_counts(chosen), "Suggested action (selected)"))
+    if not chosen.empty:
+        with st.expander(f"Selected customers ({len(chosen):,})"):
+            ordered = chosen.sort_values(rt.ORDER_COL, kind="mergesort")
+            st.dataframe(ordered[[rt.ORDER_COL, rt.COST_COL] + _plan_columns(ordered)], hide_index=True,
+                         column_config=_plan_column_config())
+    return selection, budget, float(pd.Series(costs).mean())
+
+
+def _retention_scenarios(plan: pd.DataFrame, budget: float, cost: float) -> None:
+    st.caption(
+        "Each row is one set of campaign assumptions. The presets share the planner's budget and cost "
+        "(the average cost when costs differ by action) and differ only in the lowest eligible band. Edit "
+        "any cell or add rows; scenarios use one cost per customer. Changing scenarios only re-runs these "
+        "planning rules; the model and threshold are untouched.")
+    table = rt.scenario_table(rt.preset_scenarios(budget, cost))
+    edited = st.data_editor(table, num_rows="dynamic", hide_index=True, column_config={
+        "Lowest band": st.column_config.SelectboxColumn(options=list(rt.RISK_BANDS), required=True),
+        "Strategy": st.column_config.SelectboxColumn(options=list(rt.STRATEGIES), required=True),
+        "Budget": st.column_config.NumberColumn(min_value=0.0),
+        "Cost per customer": st.column_config.NumberColumn(min_value=0.0),
+        "Max customers (0 = no limit)": st.column_config.NumberColumn(min_value=0, step=1),
+        "Min model score (%)": st.column_config.NumberColumn(min_value=0.0, max_value=100.0),
+    })
+    scenarios, errors = rt.scenarios_from_table(edited)
+    for error in errors:
+        st.warning(error)
+    if not scenarios:
+        st.info("Add at least one valid scenario to compare.")
+        return
+    comparison = rt.compare_scenarios(plan, scenarios)
+    st.dataframe(comparison, hide_index=True, column_config={
+        c: st.column_config.NumberColumn(format="%.2f") for c in comparison.columns
+        if c.startswith(("Mean", "Median", "Complaint", "Estimated", "Unspent"))})
+    left, right = st.columns(2)
+    with left.container(border=True):
+        st.altair_chart(charts.scenario_band_chart(comparison))
+    with right.container(border=True):
+        st.altair_chart(charts.scenario_cost_chart(comparison))
+    st.caption(
+        "**Trade-off:** wider eligibility and larger budgets contact more customers at a higher estimated "
+        "cost, and usually add customers with lower model scores and fewer observed triggers. Compare the "
+        "mean score, complaint share and band mix of each scenario. A scenario that contacts more customers "
+        "is not inherently more effective: this dataset contains no evidence of how customers respond to "
+        "outreach, so no retention or revenue outcomes are estimated.")

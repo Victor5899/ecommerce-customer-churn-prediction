@@ -157,6 +157,7 @@ Historical churn is always calculated from the actual `Churn` labels. Model pred
 | **Churn Prediction** | Batch scoring of CSV/XLSX uploads (see below). Shows a prediction summary for the current upload, configurable Low/Medium/High risk bands, a probability histogram with the decision threshold marked, and a risk list you can filter and sort. Downloads cover the full results or the filtered view. |
 | **Model Performance** | Saved held-out test metrics at the tuned threshold (precision, recall, F1, ROC-AUC, PR-AUC, accuracy) with an interactive confusion matrix and a reference comparison at 0.5. Cross-validation and validation results are on separate tabs, along with the candidate comparison and the saved plots. Further tabs show permutation feature importance and probability calibration (see below). Missing or out-of-date artifacts produce a warning, and if the metadata fails its checks the results are hidden. |
 | **Data Quality** | Training-time findings: dataset size, missing values per column, the duplicate-removal report with the removed records (downloadable), the train/validation/test split, alternative category spellings found in the data, and known limitations. A separate tab holds checks on the current upload: missing values, duplicate rows and IDs, unseen categories and label availability. |
+| **Retention Intelligence** | Retention planning for the current scored batch (see [Retention Intelligence](#retention-intelligence)): a ranked prioritisation table, rule-based suggested actions with reasons, a budget planner, a what-if scenario comparison and a CSV action plan. It reuses the batch scores and never re-runs the model. |
 
 ### Batch prediction
 
@@ -181,6 +182,7 @@ The images in `screenshots/` predate this dashboard and the threshold/deduplicat
 - [ ] Churn Prediction: original workbook scored, risk histogram and filtered risk list
 - [ ] Model Performance: test-set tab with confusion matrix; cross-validation tab
 - [ ] Data Quality: training-data tab and current-upload tab
+- [ ] Retention Intelligence: prioritisation table, budget planner and scenario comparison
 
 ---
 
@@ -218,6 +220,7 @@ ecommerce-customer-churn-prediction
 │   ├── explainability.py      Permutation importance, impurity mapping, per-customer Shapley values
 │   ├── calibration.py         Calibrators, Brier/log loss/reliability, calibration artifact checks
 │   ├── explain_calibrate.py   Builds the explainability and calibration artifacts (no retraining)
+│   ├── retention.py           Retention planning rules: bands, suggestions, ranking, budgets, scenarios
 │   └── train_models.py        Training, model selection, threshold tuning, evaluation, artifacts
 │
 ├── tests                      pytest suite (synthetic fixtures + dashboard smoke tests)
@@ -333,6 +336,41 @@ The dashboard checks both artifacts against the loaded model's SHA-256 and the c
 
 ---
 
+# Retention Intelligence
+
+The **Retention Intelligence** page turns the current scored batch into an outreach plan. The planning logic lives in `src/retention.py` as pure pandas functions, kept apart from the ML pipeline and the Streamlit renderers. It reads the columns already produced by scoring, so it never refits or re-scores the model, never changes the decision threshold, and writes no files. Score a file on **Churn Prediction** first.
+
+**Planning risk bands.** These are Low / Medium / High bands on the uncalibrated model score, with configurable boundaries (default: Medium starts at the decision threshold, High at 60%). They are independent of `Churn Prediction`: moving them never changes the official 0/1 label.
+
+**Suggested actions.** The rules are configurable and apply in this order. The first rule that applies sets the action, and the other applicable actions are listed next to it:
+
+| Order | Action | Applies when (default) |
+|---|---|---|
+| 1 | Complaint resolution follow-up | `Complain = 1` |
+| 2 | Onboarding assistance | `Tenure ≤ 2` months |
+| 3 | Service-quality follow-up | `SatisfactionScore ≤ 2` |
+| 4 | Re-engagement message | `DaySinceLastOrder ≥ 10` |
+| 5 | Manual review | no rule applies and a rule feature is missing |
+| 6 | General check-in | no rule applies and every rule feature is observed |
+
+Each suggestion records the action, a reason quoting the observed values, the condition that applied, and the label "Heuristic rule; not a validated treatment". Missing values never trigger a rule. No rule suggests discounts.
+
+**Ranking policies.** Rank 1 means "contact first", and ties always fall back to file order:
+- *Priority ranking*: planning band (High first), then the number of rules that applied, then model score.
+- *Highest score first*: model score only.
+
+Calibrated probabilities are shown when the validated calibrator is loaded. They are a monotonic remap of the score, so they are not used for ranking and would not change it.
+
+**Budget planner.** You set the total budget, a cost per contact (one cost for everyone, or a separate cost per suggested action), an optional contact limit, a minimum score, the lowest eligible band, optionally "official predicted churners only", and the strategy. Eligible customers are taken strictly in rank order while the running cost stays within budget and under the contact limit. Selection stops at the first customer who does not fit, so a lower-ranked customer is never chosen instead of a higher-ranked one. The planner reports eligible and selected counts, estimated cost, unspent budget, selected customers per band, and the observed characteristics of selected vs not-selected customers. The default budget (1,000) and cost (10) are placeholders and use no particular currency.
+
+**What-if scenarios.** This is an editable table of scenarios. Each row sets a budget, a cost per customer, a contact limit, a minimum score, the lowest band and a strategy. The presets (*Conservative* = High band only, *Moderate* = Medium and above, *Broad* = all bands) share the planner's budget and cost. The comparison table and charts show selection counts, cost against budget, the band mix and the characteristics of the selected customers. Invalid rows are skipped with a warning.
+
+**Export.** The action plan CSV has a fixed column layout. The full plan is in original file order; the selected-customers file is in selection order. Every row has `Row ID` (its position in the upload) and an `Identifier Type` column. When `CustomerID` is missing or duplicated, `Row ID` is the only identifier, and it is not stable across files.
+
+**What it does not do.** The page does not estimate customers retained, revenue saved, customer lifetime value or intervention effectiveness. The dataset contains no outcomes of past outreach, so none of these can be validated. A scenario that contacts more customers is not more effective just because it reaches more people.
+
+---
+
 # Output Files
 
 | File | Contents |
@@ -359,7 +397,8 @@ The dashboard checks both artifacts against the loaded model's SHA-256 and the c
 - Inconsistent category labels are not harmonised.
 - The random split assumes rows are independent snapshots; no time-based validation is possible because the dataset has no dates.
 - No REST API, database, authentication, deployment, monitoring or automated retraining.
-- The dashboard does not generate retention recommendations; it identifies high-risk customers.
+- Retention suggestions are fixed heuristic rules on four observed features. They have not been tested as treatments, and the planner does not estimate retained customers, revenue, customer lifetime value or uplift. Costs and budgets are user assumptions.
+- Retention plans exist only in the browser session. Without a unique `CustomerID`, rows can be identified only by their position in the uploaded file.
 
 ---
 

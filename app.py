@@ -33,6 +33,7 @@ PAGES = {
     "Churn Prediction": pages.churn_prediction,
     "Model Performance": pages.model_performance,
     "Data Quality": pages.data_quality,
+    "Retention Intelligence": pages.retention_intelligence,
 }
 
 st.set_page_config(
@@ -150,7 +151,7 @@ ctx = pages.DashboardContext(
 
 with st.sidebar:
     st.markdown("## 📊 Churn Analytics")
-    st.caption("E-commerce customer churn: history, drivers and batch risk scoring.")
+    st.caption("E-commerce customer churn: history, drivers, batch risk scoring and retention planning.")
     page = st.radio("Navigate", list(PAGES), key="page", label_visibility="collapsed")
     st.divider()
     st.markdown("**Model status**")

@@ -210,3 +210,38 @@ def missing_values_chart(table: pd.DataFrame) -> alt.Chart:
         x=alt.X("Missing %:Q", title="Missing values (% of rows)"),
         tooltip=["Column", alt.Tooltip("Missing:Q", format=","), alt.Tooltip("Missing %:Q", format=".2f")],
     ).properties(height=max(26 * len(table), 80))
+
+
+def action_mix_chart(table: pd.DataFrame, title: str) -> alt.Chart:
+    return alt.Chart(table).mark_bar(color=PRIMARY, cornerRadiusEnd=3).encode(
+        y=alt.Y("Action:N", sort=list(table["Action"]), title=None),
+        x=alt.X("Customers:Q", title="Customers"),
+        tooltip=["Action", alt.Tooltip("Customers:Q", format=",")],
+    ).properties(title=title, height=max(30 * len(table), 80))
+
+
+def scenario_band_chart(comparison: pd.DataFrame) -> alt.Chart:
+    """Selected customers per scenario, stacked by planning risk band."""
+    data = comparison.melt(id_vars="Scenario", value_vars=[f"{b} band" for b in RISK_COLORS],
+                           var_name="Band", value_name="Customers")
+    data["Band"] = data["Band"].str.replace(" band", "", regex=False)
+    return alt.Chart(data).mark_bar().encode(
+        x=alt.X("Scenario:N", sort=list(comparison["Scenario"]), title=None, axis=alt.Axis(labelAngle=0)),
+        y=alt.Y("Customers:Q", stack=True, title="Selected customers"),
+        color=alt.Color("Band:N", scale=_scale(RISK_COLORS), legend=alt.Legend(orient="bottom")),
+        tooltip=["Scenario", "Band", alt.Tooltip("Customers:Q", format=",")],
+    ).properties(title="Selected customers by planning risk band", height=HEIGHT)
+
+
+def scenario_cost_chart(comparison: pd.DataFrame) -> alt.Chart:
+    """Estimated campaign cost per scenario against its budget."""
+    order = list(comparison["Scenario"])
+    base = alt.Chart(comparison).encode(
+        x=alt.X("Scenario:N", sort=order, title=None, axis=alt.Axis(labelAngle=0)))
+    bars = base.mark_bar(color=NEUTRAL, cornerRadiusEnd=3).encode(
+        y=alt.Y("Estimated cost:Q", title="Estimated campaign cost"),
+        tooltip=["Scenario", alt.Tooltip("Estimated cost:Q", format=",.2f"),
+                 alt.Tooltip("Budget:Q", format=",.2f"), alt.Tooltip("Unspent budget:Q", format=",.2f")])
+    ticks = base.mark_tick(color=PRIMARY, thickness=3, size=40).encode(
+        y="Budget:Q", tooltip=["Scenario", alt.Tooltip("Budget:Q", format=",.2f")])
+    return (bars + ticks).properties(title="Estimated cost (bars) vs budget (ticks)", height=HEIGHT)
