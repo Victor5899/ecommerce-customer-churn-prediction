@@ -75,7 +75,7 @@ def risk_histogram(probability_pct: pd.Series, segments: pd.Series,
             .groupby(["Bin", "Segment"]).size().reset_index(name="Customers"))
     data["Range"] = data["Bin"].map(lambda b: f"{b:.0f}–{b + 5:.0f}%")
     bars = alt.Chart(data).mark_bar(binSpacing=1).encode(
-        x=alt.X("Bin:Q", bin=alt.Bin(step=5, extent=[0, 100]), title="Churn probability (%)"),
+        x=alt.X("Bin:Q", bin=alt.Bin(step=5, extent=[0, 100]), title="Model churn score, uncalibrated (%)"),
         y=alt.Y("Customers:Q", stack=True),
         color=alt.Color("Segment:N", scale=_scale(RISK_COLORS), legend=alt.Legend(orient="bottom")),
         tooltip=["Range", "Segment", alt.Tooltip("Customers:Q", format=",")],
@@ -85,7 +85,7 @@ def risk_histogram(probability_pct: pd.Series, segments: pd.Series,
         layers.append(alt.Chart(pd.DataFrame({"Threshold": [threshold_pct]})).mark_rule(
             color=PRIMARY, strokeDash=[5, 4], size=2).encode(
             x="Threshold:Q", tooltip=[alt.Tooltip("Threshold:Q", title="Decision threshold (%)")]))
-    return alt.layer(*layers).properties(title="Churn probability distribution", height=HEIGHT)
+    return alt.layer(*layers).properties(title="Model churn score distribution", height=HEIGHT)
 
 
 def confusion_matrix_chart(cm: dict) -> alt.Chart:
@@ -131,6 +131,77 @@ def cv_comparison_chart(candidates: pd.DataFrame) -> alt.Chart:
     errors = alt.Chart(data).mark_errorbar(color="#1B2631").encode(
         y=y, x=alt.X("low:Q", title=""), x2="high:Q")
     return (bars + errors).properties(height=40 * len(data) + 40)
+
+
+def importance_chart(table: pd.DataFrame, top_n: int = 15) -> alt.Chart:
+    """Horizontal bars of mean permutation importance with ±1 std error bars."""
+    data = table.head(top_n).assign(
+        low=lambda t: t["importance_mean"] - t["importance_std"],
+        high=lambda t: t["importance_mean"] + t["importance_std"],
+    )
+    y = alt.Y("feature:N", sort=list(data["feature"]), title=None)
+    bars = alt.Chart(data).mark_bar(color=PRIMARY, cornerRadiusEnd=3).encode(
+        y=y, x=alt.X("importance_mean:Q", title="Mean drop in PR-AUC when shuffled (± 1 std)"),
+        tooltip=[alt.Tooltip("feature:N", title="Feature"),
+                 alt.Tooltip("importance_mean:Q", format=".4f", title="Mean drop"),
+                 alt.Tooltip("importance_std:Q", format=".4f", title="Std across repeats"),
+                 alt.Tooltip("importance_min:Q", format=".4f", title="Min"),
+                 alt.Tooltip("importance_max:Q", format=".4f", title="Max")],
+    )
+    errors = alt.Chart(data).mark_errorbar(color="#1B2631").encode(y=y, x=alt.X("low:Q", title=""), x2="high:Q")
+    return (bars + errors).properties(height=24 * len(data) + 40)
+
+
+def reliability_chart(tables: dict) -> alt.Chart:
+    """Observed churn rate vs mean predicted probability per bin, one line per probability source."""
+    frames = [t.assign(Source=name) for name, t in tables.items()]
+    data = pd.concat(frames, ignore_index=True)
+    data = data[data["n"] > 0]
+    colors = {"Uncalibrated": NEUTRAL, "Calibrated": PRIMARY}
+    diagonal = alt.Chart(pd.DataFrame({"x": [0, 1], "y": [0, 1]})).mark_line(
+        color="#B0B7C0", strokeDash=[4, 4]).encode(x="x:Q", y="y:Q")
+    lines = alt.Chart(data).mark_line(point=True).encode(
+        x=alt.X("mean_predicted:Q", title="Mean predicted probability", scale=alt.Scale(domain=[0, 1])),
+        y=alt.Y("observed_rate:Q", title="Observed churn rate", scale=alt.Scale(domain=[0, 1])),
+        color=alt.Color("Source:N", scale=_scale({k: colors.get(k, PRIMARY) for k in tables}),
+                        legend=alt.Legend(orient="bottom", title=None)),
+        tooltip=["Source", alt.Tooltip("lower:Q", format=".1f", title="Bin from"),
+                 alt.Tooltip("upper:Q", format=".1f", title="Bin to"), alt.Tooltip("n:Q", title="Customers"),
+                 alt.Tooltip("mean_predicted:Q", format=".3f"), alt.Tooltip("observed_rate:Q", format=".3f")],
+    )
+    return (diagonal + lines).properties(height=320)
+
+
+def contribution_waterfall(frame: pd.DataFrame, base_value: float, prediction: float,
+                           top_n: int = 10) -> alt.Chart:
+    """Waterfall from the reference value to the prediction, in percentage points."""
+    head, tail = frame.head(top_n), frame.iloc[top_n:]
+    rows = [{"label": f"{r.feature} = {'missing' if r.value is None else r.value}",
+             "delta": r.contribution * 100, "se": r.std_error * 100} for r in head.itertuples()]
+    if len(tail):
+        rows.append({"label": f"{len(tail)} other features", "delta": tail["contribution"].sum() * 100,
+                     "se": float("nan")})
+    data = pd.DataFrame(rows)
+    data["end"] = base_value * 100 + data["delta"].cumsum()
+    data["start"] = data["end"] - data["delta"]
+    data["Direction"] = data["delta"].map(lambda d: "Increases score" if d >= 0 else "Decreases score")
+    order = list(data["label"])
+    bars = alt.Chart(data).mark_bar().encode(
+        y=alt.Y("label:N", sort=order, title=None),
+        x=alt.X("start:Q", title="Model churn score (%)"), x2="end:Q",
+        color=alt.Color("Direction:N", scale=_scale({"Increases score": STATUS_COLORS["Churned"],
+                                                     "Decreases score": STATUS_COLORS["Retained"]}),
+                        legend=alt.Legend(orient="bottom", title=None)),
+        tooltip=[alt.Tooltip("label:N", title="Feature"),
+                 alt.Tooltip("delta:Q", format="+.2f", title="Contribution (pp)"),
+                 alt.Tooltip("se:Q", format=".2f", title="Sampling std error (pp)"),
+                 alt.Tooltip("end:Q", format=".1f", title="Running score (%)")],
+    )
+    marks = pd.DataFrame({"x": [base_value * 100, prediction * 100],
+                          "Marker": ["Reference value", "Prediction"]})
+    rules = alt.Chart(marks).mark_rule(strokeDash=[4, 3], color="#1B2631").encode(
+        x="x:Q", tooltip=["Marker", alt.Tooltip("x:Q", format=".1f", title="Score (%)")])
+    return (bars + rules).properties(height=26 * len(data) + 50)
 
 
 def missing_values_chart(table: pd.DataFrame) -> alt.Chart:

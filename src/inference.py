@@ -18,7 +18,8 @@ METADATA_SCHEMA_VERSION = 2
 SUPPORTED_EXTENSIONS = (".csv", ".xlsx")
 PREDICTION_COL = "Churn Prediction"
 PROBABILITY_COL = "Churn Probability"
-OUTPUT_COLS = (PREDICTION_COL, PROBABILITY_COL)
+CALIBRATED_COL = "Calibrated Churn Probability"
+OUTPUT_COLS = (PREDICTION_COL, PROBABILITY_COL, CALIBRATED_COL)
 
 
 class DataValidationError(ValueError):
@@ -316,12 +317,15 @@ def prepare_features(df: pd.DataFrame, schema: FeatureSchema) -> tuple[pd.DataFr
     return X, report
 
 
-def score_prepared(model, df: pd.DataFrame, X: pd.DataFrame, threshold: Optional[float]):
+def score_prepared(model, df: pd.DataFrame, X: pd.DataFrame, threshold: Optional[float],
+                   calibrator: Optional[dict] = None):
     """Score features from ``prepare_features`` and attach results to the uploaded rows.
 
     ``results`` keeps every uploaded column and row in the original order and
     appends the 0/1 churn prediction (only when a valid threshold is available)
-    and the churn probability in percent. Any existing prediction columns are replaced.
+    and the churn probability in percent. With a validated ``calibrator`` the
+    calibrated probability is added too; the prediction always uses the
+    uncalibrated score. Any existing prediction columns are replaced.
     """
     if len(X) != len(df) or not X.index.equals(df.index):
         raise ValueError("Prepared features are not aligned with the uploaded rows.")
@@ -330,6 +334,10 @@ def score_prepared(model, df: pd.DataFrame, X: pd.DataFrame, threshold: Optional
     if threshold is not None:
         results[PREDICTION_COL] = apply_threshold(proba, threshold)
     results[PROBABILITY_COL] = np.round(proba * 100, 2)
+    if calibrator is not None:
+        from calibration import apply_calibrator
+
+        results[CALIBRATED_COL] = np.round(apply_calibrator(calibrator, proba) * 100, 2)
     return results, proba
 
 

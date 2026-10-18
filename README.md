@@ -155,7 +155,7 @@ Historical churn is always calculated from the actual `Churn` labels. Model pred
 | **Executive Overview** | Historical record count and actual churn rate (raw and de-duplicated), next to the number and share of customers predicted to churn in the current scoring batch. Shows the churn distribution, actual churn rate by tenure, satisfaction score, complaint status and order count, and a short list of observations computed from the data. |
 | **Customer Analytics** | Explore any model feature for the historical dataset or the current scored batch. Filters cover tenure, city tier, order category and complaints, with missing values optionally included. Each feature gets a distribution chart (split by actual outcome when labels exist), an actual churn rate by segment, and median feature values for retained vs churned customers. Churn patterns are shown only when the source has a complete 0/1 `Churn` column. |
 | **Churn Prediction** | Batch scoring of CSV/XLSX uploads (see below). Shows a prediction summary for the current upload, configurable Low/Medium/High risk bands, a probability histogram with the decision threshold marked, and a risk list you can filter and sort. Downloads cover the full results or the filtered view. |
-| **Model Performance** | Saved held-out test metrics at the tuned threshold (precision, recall, F1, ROC-AUC, PR-AUC, accuracy) with an interactive confusion matrix and a reference comparison at 0.5. Cross-validation and validation results are on separate tabs, along with the candidate comparison and the saved plots. Missing or out-of-date artifacts produce a warning, and if the metadata fails its checks the results are hidden. |
+| **Model Performance** | Saved held-out test metrics at the tuned threshold (precision, recall, F1, ROC-AUC, PR-AUC, accuracy) with an interactive confusion matrix and a reference comparison at 0.5. Cross-validation and validation results are on separate tabs, along with the candidate comparison and the saved plots. Further tabs show permutation feature importance and probability calibration (see below). Missing or out-of-date artifacts produce a warning, and if the metadata fails its checks the results are hidden. |
 | **Data Quality** | Training-time findings: dataset size, missing values per column, the duplicate-removal report with the removed records (downloadable), the train/validation/test split, alternative category spellings found in the data, and known limitations. A separate tab holds checks on the current upload: missing values, duplicate rows and IDs, unseen categories and label availability. |
 
 ### Batch prediction
@@ -215,6 +215,9 @@ ecommerce-customer-churn-prediction
 │   ├── dashboard.py           Dashboard calculations (actual vs predicted churn, segments, quality)
 │   ├── charts.py              Altair chart builders
 │   ├── dashboard_pages.py     Streamlit page renderers
+│   ├── explainability.py      Permutation importance, impurity mapping, per-customer Shapley values
+│   ├── calibration.py         Calibrators, Brier/log loss/reliability, calibration artifact checks
+│   ├── explain_calibrate.py   Builds the explainability and calibration artifacts (no retraining)
 │   └── train_models.py        Training, model selection, threshold tuning, evaluation, artifacts
 │
 ├── tests                      pytest suite (synthetic fixtures + dashboard smoke tests)
@@ -229,7 +232,10 @@ ecommerce-customer-churn-prediction
 │   ├── confusion_matrix.png
 │   ├── feature_importance.png
 │   ├── pr_curve.png
-│   └── roc_curve.png
+│   ├── roc_curve.png
+│   ├── explainability.json
+│   ├── calibration.json
+│   └── calibrator.joblib
 │
 └── screenshots
 ```
@@ -299,6 +305,34 @@ Unit tests use small synthetic datasets and temporary directories; no network ac
 
 ---
 
+# Explainability and Calibration
+
+These artifacts are built from the **saved** model without retraining it. `best_model.joblib` and `metrics.json` are left unchanged:
+
+```bash
+python src/explain_calibrate.py --input "data/E Commerce Dataset.xlsx"   # about 10 seconds
+```
+
+The script rebuilds the train/validation/test partitions from the settings in `metrics.json`. It stops unless the partition sizes and the recorded validation and test PR-AUC are reproduced exactly.
+
+- **Permutation importance** (Model Performance → Feature importance) shuffles each raw input feature on the **validation partition** 10 times and records the drop in PR-AUC, reporting the mean and standard deviation. Shuffling happens before preprocessing, so one-hot-encoded categories count as a single feature. The results are compared with the Random Forest's impurity importance, with one-hot columns summed back to their source feature. Importance shows how much the model relies on a feature, not what causes churn.
+- **Customer explanations** (Churn Prediction → Explain individual customers) estimate interventional Shapley values for up to 5 scored customers at a time. Each estimate uses antithetic permutation sampling over a 100-customer sample from the training partition; this is a small numpy implementation, so the `shap` package is not needed. Contributions are in percentage points of the model's uncalibrated churn score. They add up exactly to the customer's score minus the reference value (the mean score of the background sample), and the dashboard checks this against the model's own prediction. Sampling standard errors are shown. Results are cached per customer. The contributions describe the model's behaviour, not causes.
+- **Calibration** (Model Performance → Calibration) compares no calibration, sigmoid calibration (logistic regression on the score's log-odds) and isotonic calibration. The method with the lowest out-of-fold Brier score in 5-fold cross-validation on the **validation partition** is selected and refitted on that partition. The test partition is used once, for the final comparison: Brier score, log loss, expected calibration error, ROC-AUC, PR-AUC and reliability diagrams. With a calibrator available, predictions add a `Calibrated Churn Probability` column. `Churn Prediction`, `Churn Probability`, the risk bands and the decision threshold still use the uncalibrated score, so labels and customer ranking are unchanged.
+
+| Test partition (1,015 customers) | Uncalibrated | Sigmoid-calibrated |
+|---|---|---|
+| Brier score | 0.0445 | 0.0317 |
+| Log loss | 0.1697 | 0.1071 |
+| Expected calibration error (10 bins) | 0.0830 | 0.0125 |
+| ROC-AUC | 0.9874 | 0.9874 |
+| PR-AUC | 0.9446 | 0.9446 |
+
+The Random Forest's raw scores are under-confident; the calibrator's log-odds slope is about 2.5. A raw score at the 0.25 threshold corresponds to a calibrated probability of about 20%. Both the threshold and the calibrator were fitted on the validation partition.
+
+The dashboard checks both artifacts against the loaded model's SHA-256 and the calibrator file's SHA-256. If an artifact is missing, belongs to a different model, or was built from a different dataset file, the dashboard shows a warning and runs without it.
+
+---
+
 # Output Files
 
 | File | Contents |
@@ -310,6 +344,9 @@ Unit tests use small synthetic datasets and temporary directories; no network ac
 | `data_quality_report.json` | Duplicate audit and deduplication result |
 | `removed_duplicates.csv` | Removed records and the CustomerID kept in their place |
 | `*.png` | Test-set ROC, PR (with the threshold marked) and confusion matrix; feature importance |
+| `explainability.json` | Permutation importance on the validation partition, impurity-importance comparison, 100-row training background sample; model and dataset SHA-256 |
+| `calibration.json` | Calibration method selection (validation CV), test-set Brier/log loss/ECE/ROC-AUC/PR-AUC and reliability bins, threshold mapping; model and calibrator SHA-256 |
+| `calibrator.joblib` | The selected calibrator (written only if a method other than `none` is selected and passes its checks) |
 
 ---
 

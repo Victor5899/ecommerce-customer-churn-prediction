@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -12,9 +12,10 @@ import streamlit as st
 
 import charts
 import dashboard as db
+import explainability as xai
 from inference import (
-    PREDICTION_COL, PROBABILITY_COL, DataValidationError, FeatureSchema, file_extension,
-    prepare_features, resolve_sheet, score_prepared,
+    CALIBRATED_COL, PREDICTION_COL, PROBABILITY_COL, DataValidationError, FeatureSchema,
+    file_extension, prepare_features, resolve_sheet, score_prepared,
 )
 from utils import DATA_SHEET, ID_COL, TARGET_COL
 
@@ -39,6 +40,19 @@ class DashboardContext:
     train_command: str
     excel_sheets: Callable
     parse_upload: Callable
+    explainability: Optional[dict] = None
+    background: Optional[pd.DataFrame] = None
+    explainability_error: Optional[str] = "Explainability artifacts were not loaded."
+    calibration: Optional[dict] = None
+    calibrator: Optional[dict] = None
+    calibration_error: Optional[str] = "Calibration artifacts were not loaded."
+    xai_command: str = "python src/explain_calibrate.py --input <dataset>"
+    xai_warnings: list = field(default_factory=list)
+
+
+@st.cache_data(show_spinner=False, max_entries=64)
+def _explain_cached(_model, model_sha: str, row: pd.DataFrame, background: pd.DataFrame):
+    return xai.shapley_values(_model, row, background)
 
 
 def _batch() -> Optional[dict]:
@@ -211,7 +225,7 @@ def _threshold_banner(ctx: DashboardContext) -> None:
     if ctx.threshold is not None:
         st.info(
             f"**Decision threshold: {ctx.threshold:.2f}.** A customer is predicted to churn when the "
-            f"churn probability is at least {ctx.threshold:.0%}. The threshold was chosen on the "
+            f"model churn score (uncalibrated) is at least {ctx.threshold:.0%}. The threshold was chosen on the "
             f"validation set ({ctx.metadata['threshold']['objective']}); the saved test metrics use "
             "the same threshold."
         )
@@ -290,11 +304,12 @@ def churn_prediction(ctx: DashboardContext) -> None:
         st.warning(f"Categories not seen during training (treated as none of the known categories, "
                    f"so these predictions may be less reliable): {details}.")
 
-    key = (hashlib.sha256(raw).hexdigest(), sheet, ctx.threshold, ctx.model_sha)
+    calibration_id = (ctx.calibration or {}).get("calibrator_sha256") if ctx.calibrator else None
+    key = (hashlib.sha256(raw).hexdigest(), sheet, ctx.threshold, ctx.model_sha, calibration_id)
     if st.button("Predict Churn", type="primary"):
         try:
             with st.spinner(f"Scoring {len(df):,} customers..."):
-                results, _ = score_prepared(ctx.model, df, X, ctx.threshold)
+                results, _ = score_prepared(ctx.model, df, X, ctx.threshold, ctx.calibrator)
         except Exception as exc:
             st.error(f"**Prediction failed:** {exc}")
             return
@@ -321,13 +336,14 @@ def _render_batch(ctx: DashboardContext, batch: dict) -> None:
         m[1].metric("Predicted to churn", f"{summary.n_predicted_churn:,}",
                     f"{summary.predicted_rate:.1%} of batch", delta_color="off")
         m[2].metric("Predicted to stay", f"{summary.n_customers - summary.n_predicted_churn:,}")
-    m[3].metric("Mean churn probability", f"{summary.mean_probability:.1f}%")
+    m[3].metric("Mean model churn score", f"{summary.mean_probability:.1f}%",
+                help="Average uncalibrated model score, not an expected churn rate.")
     if summary.actual is not None:
         st.caption(f"This file also contains actual `{TARGET_COL}` labels: {summary.actual.n_churned:,} "
                    f"customers ({summary.actual.rate:.1%}) actually churned. Labels were not used for scoring.")
 
     low_default, high_default = db.default_risk_bounds(ctx.threshold)
-    low, high = st.slider("Risk band boundaries (churn probability, %)", 1, 99,
+    low, high = st.slider("Risk band boundaries (model churn score, %)", 1, 99,
                           (low_default, high_default), key="risk_bounds",
                           help="Presentation only: Low < first value ≤ Medium < second value ≤ High. "
                                "The churn prediction always uses the model's decision threshold.")
@@ -353,14 +369,15 @@ def _render_batch(ctx: DashboardContext, batch: dict) -> None:
     st.subheader("Customer risk list")
     f1, f2, f3, f4 = st.columns([2, 2, 1.5, 1.5])
     chosen = f1.multiselect("Risk segments", list(db.RISK_SEGMENTS), default=list(db.RISK_SEGMENTS))
-    min_p = f2.slider("Minimum churn probability (%)", 0, 100, 0)
+    min_p = f2.slider("Minimum model churn score (%)", 0, 100, 0)
     sort = f3.selectbox("Sort by risk", ["desc", "asc", "original"],
                         format_func={"desc": "Highest first", "asc": "Lowest first",
                                      "original": "Original file order"}.get)
     predicted_only = f4.checkbox("Predicted churners only", disabled=ctx.threshold is None)
     view = db.filter_by_risk(scored, chosen, min_p, predicted_only, sort)
 
-    lead = [c for c in (ID_COL, PROBABILITY_COL, db.RISK_COL, PREDICTION_COL) if c in view.columns]
+    lead = [c for c in (ID_COL, PROBABILITY_COL, CALIBRATED_COL, db.RISK_COL, PREDICTION_COL)
+            if c in view.columns]
     ordered = view[lead + [c for c in view.columns if c not in lead]]
     st.caption(f"Showing {len(view):,} of {len(scored):,} customers.")
     if view.empty:
@@ -368,10 +385,18 @@ def _render_batch(ctx: DashboardContext, batch: dict) -> None:
     else:
         st.dataframe(ordered, hide_index=True, column_config={
             PROBABILITY_COL: st.column_config.ProgressColumn(
-                PROBABILITY_COL, format="%.1f%%", min_value=0, max_value=100),
+                PROBABILITY_COL, format="%.1f%%", min_value=0, max_value=100,
+                help="Model churn score (uncalibrated). Predictions and risk bands use this score."),
+            CALIBRATED_COL: st.column_config.NumberColumn(
+                CALIBRATED_COL, format="%.1f%%",
+                help="Validation-calibrated probability estimate. Shown for interpretation only."),
             PREDICTION_COL: st.column_config.NumberColumn(
                 PREDICTION_COL, help="1 = predicted to churn at the decision threshold"),
         })
+    if CALIBRATED_COL in scored.columns:
+        st.caption(f"`{PROBABILITY_COL}` is the model's raw score; `{CALIBRATED_COL}` rescales it so "
+                   "values better match observed churn frequencies. Customer ranking and predictions "
+                   "are unchanged.")
 
     d1, d2 = st.columns(2)
     d1.download_button("Download all results (original order)",
@@ -382,6 +407,88 @@ def _render_batch(ctx: DashboardContext, batch: dict) -> None:
                        on_click="ignore", disabled=view.empty)
     st.caption("Downloads contain every uploaded column (including customer IDs) plus the churn "
                f"probability, prediction and the risk segment for the current band boundaries.")
+    _render_explanations(ctx, scored, view)
+
+
+def _customer_label(results: pd.DataFrame, index) -> str:
+    if ID_COL in results.columns and pd.notna(results.at[index, ID_COL]):
+        return f"{ID_COL} {results.at[index, ID_COL]} (row {index + 1})"
+    return f"Row {index + 1}"
+
+
+def _render_explanations(ctx: DashboardContext, scored: pd.DataFrame, view: pd.DataFrame) -> None:
+    st.subheader("Explain individual customers")
+    if ctx.explainability is None or ctx.background is None:
+        st.warning(f"Customer explanations are unavailable: {ctx.explainability_error} "
+                   f"Generate them with `{ctx.xai_command}`.")
+        return
+    if view.empty:
+        st.info("No customers in the current risk list to explain.")
+        return
+    options = [int(i) for i in view.index[:200]]
+    chosen = st.multiselect(
+        f"Customers to explain (up to {xai.MAX_EXPLAINED_CUSTOMERS}, from the risk list above)", options,
+        default=options[:1], max_selections=xai.MAX_EXPLAINED_CUSTOMERS,
+        format_func=lambda i: _customer_label(scored, i))
+    if not chosen:
+        st.caption("Select a customer to see which features moved their churn score.")
+        return
+    st.caption(
+        "Each bar is a feature's Shapley contribution, in percentage points of the model's "
+        "**uncalibrated churn score**. Contributions start from the reference value, which is the average "
+        f"score of {ctx.explainability['background']['n_rows']} training customers, and add up to this "
+        "customer's score. They describe how the model arrived at its score. They are not causes of "
+        "churn, and changing a feature would not necessarily change the outcome.")
+
+    try:
+        X, _ = prepare_features(scored.loc[chosen], ctx.schema)
+    except DataValidationError as exc:
+        st.error(f"These customers cannot be explained: {exc}")
+        return
+    for index, tab in zip(chosen, st.tabs([_customer_label(scored, i) for i in chosen])):
+        with tab:
+            try:
+                with st.spinner("Computing explanation..."):
+                    exp = _explain_cached(ctx.model, ctx.model_sha, X.loc[[index]], ctx.background)
+            except Exception as exc:
+                st.error(f"The explanation could not be computed: {exc}")
+                continue
+            c = st.columns(4)
+            c[0].metric("Model churn score", f"{exp.prediction:.1%}")
+            c[1].metric("Reference value", f"{exp.base_value:.1%}", help="Average score of the background sample.")
+            if CALIBRATED_COL in scored.columns:
+                value = scored.at[index, CALIBRATED_COL]
+                shown = ">99.9%" if value > 99.9 else "<0.1%" if value < 0.1 else f"{value:.1f}%"
+                c[2].metric("Calibrated probability", shown,
+                            help="Validation-calibrated estimate; not explained by the contributions below.")
+            if PREDICTION_COL in scored.columns:
+                c[3].metric("Prediction", "Churn" if scored.at[index, PREDICTION_COL] == 1 else "No churn")
+            if not exp.is_consistent(1e-6):
+                st.warning(f"The explanation does not reconcile with the model's prediction "
+                           f"(difference {max(exp.additivity_error, abs(exp.prediction - exp.model_prediction)):.2e}); "
+                           "treat it with caution.")
+            frame = exp.to_frame()
+            st.altair_chart(charts.contribution_waterfall(frame, exp.base_value, exp.prediction))
+            up = frame[frame["contribution"] > 0].head(3)["feature"].tolist()
+            down = frame[frame["contribution"] < 0].head(3)["feature"].tolist()
+            st.markdown(f"- Raised the score most: {', '.join(up) or 'none'}\n"
+                        f"- Lowered the score most: {', '.join(down) or 'none'}")
+            missing = [f for f, v in zip(exp.features, exp.feature_values) if v is None]
+            if missing:
+                st.caption(f"Missing values ({', '.join(missing)}) were imputed by the model pipeline; their "
+                           "contribution reflects the imputed value.")
+            with st.expander("Contribution table"):
+                st.dataframe(frame.assign(value=frame["value"].map(lambda v: "missing" if v is None else str(v)),
+                                          contribution=frame["contribution"] * 100,
+                                          std_error=frame["std_error"] * 100)
+                             .rename(columns={"contribution": "Contribution (pp)",
+                                              "std_error": "Sampling std error (pp)"}),
+                             hide_index=True, column_config={
+                                 c: st.column_config.NumberColumn(format="%+.2f")
+                                 for c in ["Contribution (pp)"]})
+                st.caption(f"Estimated from {exp.n_samples:,} sampled feature orderings. Standard errors "
+                           "show the sampling uncertainty for this fixed background sample; they do not "
+                           "include uncertainty from which background customers were chosen.")
 
 
 # --------------------------------------------------------------------------- #
@@ -417,8 +524,15 @@ def model_performance(ctx: DashboardContext) -> None:
     c3.metric("Trained (UTC)", meta.get("created_at_utc", "—")[:16].replace("T", " "))
     st.caption(f"Threshold objective: {thr['objective']}. Rule: {thr['rule']}.")
 
-    test_tab, cv_tab, val_tab, plot_tab = st.tabs(
-        ["Held-out test set", "Cross-validation & comparison", "Validation set", "Saved plots"])
+    test_tab, cv_tab, val_tab, imp_tab, cal_tab, plot_tab = st.tabs(
+        ["Held-out test set", "Cross-validation & comparison", "Validation set", "Feature importance",
+         "Calibration", "Saved plots"])
+    for warning in ctx.xai_warnings:
+        st.warning(warning)
+    with imp_tab:
+        _importance_tab(ctx)
+    with cal_tab:
+        _calibration_tab(ctx)
 
     with test_tab:
         test = meta.get("test_metrics")
@@ -501,6 +615,110 @@ def model_performance(ctx: DashboardContext) -> None:
                         st.image(str(path), caption=caption)
                     except Exception as exc:
                         st.caption(f"{caption} could not be displayed ({exc}).")
+
+
+def _importance_tab(ctx: DashboardContext) -> None:
+    if ctx.explainability is None:
+        st.warning(f"Permutation importance is unavailable: {ctx.explainability_error} "
+                   f"Generate it with `{ctx.xai_command}`.")
+        return
+    pi = ctx.explainability["permutation_importance"]
+    table = pd.DataFrame(pi["features"])
+    st.caption(
+        f"Permutation importance on the **validation partition** ({pi['n_rows']:,} customers, "
+        f"{pi['n_positive']} churners), which was not used to fit the model. Each feature was shuffled "
+        f"{pi['n_repeats']} times and the drop in PR-AUC from the unshuffled "
+        f"{pi['baseline_score']:.3f} was recorded. Error bars show ±1 standard deviation across repeats.")
+    with st.container(border=True):
+        st.altair_chart(charts.importance_chart(table))
+    st.caption("A large drop means the model relies on that feature to rank churners, not that the "
+               "feature causes churn. Correlated features can share or hide importance, and values near "
+               "zero or below it mean shuffling made no measurable difference.")
+
+    comparison = ctx.explainability.get("impurity_comparison")
+    with st.expander("Comparison with impurity-based Random Forest importance"):
+        if not comparison:
+            st.caption("Impurity importance is unavailable for this model or its features did not match.")
+        else:
+            st.dataframe(pd.DataFrame(comparison["features"]).rename(columns={
+                "feature": "Feature", "permutation": "Permutation (PR-AUC drop)",
+                "permutation_rank": "Permutation rank", "impurity": "Impurity importance",
+                "impurity_rank": "Impurity rank"}), hide_index=True, column_config={
+                c: st.column_config.NumberColumn(format="%.4f")
+                for c in ["Permutation (PR-AUC drop)", "Impurity importance"]})
+            rho = comparison.get("spearman_rank_correlation")
+            st.caption(
+                (f"Spearman rank correlation: {rho:.2f}. " if rho is not None else "")
+                + "Impurity importance is computed on training data, with one-hot columns summed back to "
+                  "their original feature. It tends to favour features with many distinct values, so "
+                  "the two rankings can differ.")
+
+
+def _calibration_tab(ctx: DashboardContext) -> None:
+    if ctx.calibration is None:
+        st.warning(f"Calibration results are unavailable: {ctx.calibration_error} "
+                   f"Generate them with `{ctx.xai_command}`.")
+        return
+    meta = ctx.calibration
+    ev, fit, thr = meta["evaluation"], meta["fit"], meta["threshold"]
+    adopted = meta["method"] != "none"
+    st.caption(
+        f"Calibration remaps the model's churn score so that, for example, customers scored around 30% "
+        f"churn about 30% of the time. Candidate methods were compared by 5-fold cross-validation on the "
+        f"**validation partition** ({fit['n_rows']:,} customers) and the winner was refitted on all of it. "
+        f"The **test partition** ({ev['uncalibrated']['n_samples']:,} customers) was used once, for the "
+        "comparison below.")
+    if adopted:
+        st.success(f"Selected method: **{meta['method']}** (logistic regression on the score's log-odds)."
+                   if meta["method"] == "sigmoid" else f"Selected method: **{meta['method']}**.")
+    else:
+        reason = (f" The selected calibrator failed its checks ({', '.join(meta['rejected_reasons'])})."
+                  if meta.get("rejected_reasons") else
+                  " Cross-validation did not show that calibration lowers the Brier score.")
+        st.info("No calibrator is applied; the dashboard uses the uncalibrated scores." + reason)
+
+    names = {"brier": "Brier score (lower is better)", "log_loss": "Log loss (lower is better)",
+             "ece": "Expected calibration error (lower is better)", "roc_auc": "ROC-AUC (ranking)",
+             "pr_auc": "PR-AUC (ranking)"}
+    columns = {"Uncalibrated": ev["uncalibrated"]}
+    if "calibrated" in ev:
+        columns["Calibrated"] = ev["calibrated"]
+    table = pd.DataFrame({k: {names[m]: v[m] for m in names} for k, v in columns.items()})
+    if "Calibrated" in table:
+        table["Change"] = table["Calibrated"] - table["Uncalibrated"]
+    left, right = st.columns([1, 1])
+    with left:
+        st.markdown("**Probability quality on the test partition**")
+        st.dataframe(table, column_config={c: st.column_config.NumberColumn(format="%.4f")
+                                           for c in table.columns})
+        st.caption("Brier score and log loss measure how close the probabilities are to the outcomes. "
+                   "ROC-AUC and PR-AUC measure ranking only. A monotonic calibrator keeps the customer "
+                   "order, so these stay essentially unchanged; calibration is not expected to improve them.")
+        if adopted:
+            st.caption(
+                f"Decision threshold unchanged at {thr['value']:.2f} on the **uncalibrated** score. That "
+                f"corresponds to a calibrated probability of {thr['calibrated_value_at_threshold']:.1%}: "
+                "thresholding the calibrated probability there gives the same churn / no-churn labels as "
+                f"the raw-score rule for {thr['test_label_agreement_at_mapped_threshold']:.1%} of test "
+                "customers. This compares two decision rules with each other; it is not accuracy. Test-set "
+                "accuracy, precision and recall at the threshold are on the held-out test tab.")
+    with right.container(border=True):
+        st.markdown("**Reliability diagram (test partition)**")
+        tables = {"Uncalibrated": pd.DataFrame(ev["reliability"]["uncalibrated"])}
+        if "calibrated" in ev["reliability"]:
+            tables["Calibrated"] = pd.DataFrame(ev["reliability"]["calibrated"])
+        st.altair_chart(charts.reliability_chart(tables))
+        st.caption("Points on the dashed diagonal are perfectly calibrated. Points below it mean the "
+                   "probabilities are too high; points above mean they are too low. Hover over a point "
+                   "to see how many customers are in its bin; bins with few customers are noisy.")
+
+    with st.expander("Method selection (validation cross-validation)"):
+        st.dataframe(pd.DataFrame(meta["selection"]["results"]), hide_index=True,
+                     column_config={c: st.column_config.NumberColumn(format="%.4f")
+                                    for c in ["brier", "log_loss", "ece"]})
+        st.caption(f"Criterion: {meta['selection']['criterion']}. 'none' keeps the uncalibrated scores. "
+                   "The decision threshold was also tuned on the validation partition, so the "
+                   "test-set comparison above is the unbiased check.")
 
 
 # --------------------------------------------------------------------------- #

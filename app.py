@@ -9,6 +9,8 @@ ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / "src"))
 
 import dashboard_pages as pages  # noqa: E402
+from calibration import load_calibration  # noqa: E402
+from explainability import background_frame, load_explainability  # noqa: E402
 from inference import (  # noqa: E402
     MetadataError, file_sha256, list_excel_sheets, load_metadata, read_uploaded_table,
     resolve_threshold, schema_from_model,
@@ -18,8 +20,12 @@ from utils import DATA_SHEET  # noqa: E402
 OUTPUT_DIR = ROOT / "outputs"
 MODEL_PATH = OUTPUT_DIR / "best_model.joblib"
 METRICS_PATH = OUTPUT_DIR / "metrics.json"
+EXPLAIN_PATH = OUTPUT_DIR / "explainability.json"
+CALIBRATION_PATH = OUTPUT_DIR / "calibration.json"
+CALIBRATOR_PATH = OUTPUT_DIR / "calibrator.joblib"
 DATA_PATH = ROOT / "data" / "E Commerce Dataset.xlsx"
 TRAIN_COMMAND = 'python src/train_models.py --input "data/E Commerce Dataset.xlsx"'
+XAI_COMMAND = 'python src/explain_calibrate.py --input "data/E Commerce Dataset.xlsx"'
 
 PAGES = {
     "Executive Overview": pages.executive_overview,
@@ -53,6 +59,21 @@ def load_metadata_cached(path: str, mtime):
 @st.cache_data(show_spinner="Loading historical dataset...")
 def load_reference(path: str, mtime) -> pd.DataFrame:
     return pd.read_excel(path, sheet_name=DATA_SHEET)
+
+
+@st.cache_data(show_spinner=False)
+def file_sha256_cached(path: str, mtime):
+    return file_sha256(path)
+
+
+@st.cache_data(show_spinner=False)
+def load_explainability_cached(path: str, mtime, model_sha: str):
+    return load_explainability(path, model_sha)
+
+
+@st.cache_resource(show_spinner=False)
+def load_calibration_cached(path: str, mtime, calibrator_mtime, model_sha: str):
+    return load_calibration(path, str(OUTPUT_DIR), model_sha)
 
 
 @st.cache_data(show_spinner=False, max_entries=8)
@@ -89,6 +110,29 @@ if DATA_PATH.exists():
 else:
     reference_error = f"`{DATA_PATH.relative_to(ROOT)}` not found"
 
+data_sha = file_sha256_cached(str(DATA_PATH), _mtime(DATA_PATH)) if DATA_PATH.exists() else None
+xai_warnings = []
+
+explain_meta, background, explain_error = None, None, None
+try:
+    explain_meta = load_explainability_cached(str(EXPLAIN_PATH), _mtime(EXPLAIN_PATH), model_sha)
+    background = background_frame(explain_meta, schema)
+except Exception as exc:
+    explain_meta, explain_error = None, str(exc)
+
+calibration_meta, calibrator, calibration_error = None, None, None
+try:
+    calibration_meta, calibrator = load_calibration_cached(
+        str(CALIBRATION_PATH), _mtime(CALIBRATION_PATH), _mtime(CALIBRATOR_PATH), model_sha)
+except Exception as exc:
+    calibration_error = str(exc)
+
+for name, meta in (("Explainability", explain_meta), ("Calibration", calibration_meta)):
+    recorded = ((meta or {}).get("data") or {}).get("source_sha256")
+    if meta is not None and data_sha is not None and recorded != data_sha:
+        xai_warnings.append(f"{name} results were computed from a different version of the dataset "
+                            f"file. Re-run `{XAI_COMMAND}`.")
+
 if metadata is not None:
     model_name = metadata["model_selection"]["selected_model_name"]
 else:
@@ -99,6 +143,9 @@ ctx = pages.DashboardContext(
     threshold=threshold, metadata_error=metadata_error, reference=reference,
     reference_error=reference_error, output_dir=OUTPUT_DIR, model_path=MODEL_PATH,
     train_command=TRAIN_COMMAND, excel_sheets=excel_sheets, parse_upload=parse_upload,
+    explainability=explain_meta, background=background, explainability_error=explain_error,
+    calibration=calibration_meta, calibrator=calibrator, calibration_error=calibration_error,
+    xai_command=XAI_COMMAND, xai_warnings=xai_warnings,
 )
 
 with st.sidebar:
@@ -113,6 +160,8 @@ with st.sidebar:
     else:
         st.error("Model metadata is missing or does not match the model. Predictions show "
                  "probabilities only.")
+    st.caption(f"Explanations: {'available' if explain_meta else 'unavailable'} · Calibration: "
+               + (calibration_meta['method'] if calibration_meta else 'unavailable'))
     batch = st.session_state.get(pages.BATCH_KEY)
     st.caption(f"Scored batch: `{batch['filename']}` ({len(batch['results']):,} rows)"
                if batch else "Scored batch: none yet")
