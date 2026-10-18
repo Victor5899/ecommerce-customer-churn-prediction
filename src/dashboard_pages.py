@@ -11,12 +11,13 @@ import pandas as pd
 import streamlit as st
 
 import charts
+import compatibility as compat
 import dashboard as db
 import explainability as xai
 import retention as rt
 from inference import (
     CALIBRATED_COL, PREDICTION_COL, PROBABILITY_COL, DataValidationError, FeatureSchema,
-    file_extension, prepare_features, resolve_sheet, score_prepared,
+    file_extension, prepare_features, read_column_names, resolve_sheet, score_prepared,
 )
 from utils import DATA_SHEET, ID_COL, TARGET_COL
 
@@ -54,6 +55,11 @@ class DashboardContext:
 @st.cache_data(show_spinner=False, max_entries=64)
 def _explain_cached(_model, model_sha: str, row: pd.DataFrame, background: pd.DataFrame):
     return xai.shapley_values(_model, row, background)
+
+
+@st.cache_data(show_spinner=False, max_entries=8)
+def _column_names(raw: bytes, filename: str, sheet) -> list:
+    return read_column_names(raw, filename, sheet)
 
 
 def _batch() -> Optional[dict]:
@@ -269,7 +275,8 @@ def churn_prediction(ctx: DashboardContext) -> None:
         return
 
     raw = uploaded_file.getvalue()
-    sheet = None
+    digest = hashlib.sha256(raw).hexdigest()
+    sheet, df = None, None
     try:
         if file_extension(uploaded_file.name) == ".xlsx":
             sheets = ctx.excel_sheets(raw)
@@ -282,13 +289,24 @@ def churn_prediction(ctx: DashboardContext) -> None:
                 )
             elif len(sheets) > 1:
                 st.caption(f"Using sheet '{sheet}' (workbook sheets: {', '.join(sheets)}).")
-        df = ctx.parse_upload(raw, uploaded_file.name, sheet)
-        X, report = prepare_features(df, ctx.schema)
+        header = _column_names(raw, uploaded_file.name, sheet)
+        check = compat.check_compatibility(None, ctx.schema, header)
+        if check.status != compat.INCOMPATIBLE:
+            df = ctx.parse_upload(raw, uploaded_file.name, sheet)
+            check = compat.check_compatibility(df, ctx.schema, header)
     except DataValidationError as exc:
         st.error(f"**This file cannot be scored.** {exc}")
         return
     except Exception as exc:
         st.error(f"**Unexpected error while reading the file:** {exc}")
+        return
+    df, fixed = _resolve_compatibility(ctx, check, df, digest)
+    if df is None:
+        return
+    try:
+        X, report = prepare_features(df, ctx.schema)
+    except DataValidationError as exc:
+        st.error(f"**This file cannot be scored.** {exc}")
         return
 
     with st.expander(f"Preview uploaded data ({len(df):,} rows, {df.shape[1]} columns)"):
@@ -306,7 +324,7 @@ def churn_prediction(ctx: DashboardContext) -> None:
                    f"so these predictions may be less reliable): {details}.")
 
     calibration_id = (ctx.calibration or {}).get("calibrator_sha256") if ctx.calibrator else None
-    key = (hashlib.sha256(raw).hexdigest(), sheet, ctx.threshold, ctx.model_sha, calibration_id)
+    key = (digest, sheet, ctx.threshold, ctx.model_sha, calibration_id, fixed)
     if st.button("Predict Churn", type="primary"):
         try:
             with st.spinner(f"Scoring {len(df):,} customers..."):
@@ -324,6 +342,48 @@ def churn_prediction(ctx: DashboardContext) -> None:
         st.caption("Click **Predict Churn** to score this file.")
         return
     _render_batch(ctx, batch)
+
+
+def _render_compatibility(ctx: DashboardContext, check: compat.CompatibilityReport) -> None:
+    n = len(ctx.schema.features)
+    if check.status == compat.INCOMPATIBLE:
+        st.error(f"**Compatibility: {check.status}.** This file cannot be scored. " + " ".join(check.problems))
+    elif check.status == compat.NEEDS_MAPPING:
+        st.warning(f"**Compatibility: {check.status}.** All {n} required features can be provided after "
+                   "the changes below are reviewed and confirmed.")
+    else:
+        target = (f"A complete 0/1 `{TARGET_COL}` column was found; it is used only to report actual churn."
+                  if check.target_usable else f"No usable `{TARGET_COL}` column; predictions only.")
+        st.success(f"**Compatibility: {check.status}.** All {n} required feature columns are present with "
+                   f"usable values. {target}")
+    notes = check.hints + check.warnings
+    if notes:
+        with st.expander(f"Compatibility notes ({len(notes)})"):
+            st.markdown("\n".join(f"- {note}" for note in notes))
+
+
+def _resolve_compatibility(ctx: DashboardContext, check: compat.CompatibilityReport,
+                           df: Optional[pd.DataFrame], digest: str):
+    """Return ``(dataframe to score, fixes applied)``, or ``(None, False)`` to stop here."""
+    _render_compatibility(ctx, check)
+    if check.status == compat.INCOMPATIBLE:
+        return None, False
+    if check.status == compat.READY:
+        return df, False
+    st.markdown("**Proposed changes**")
+    st.markdown("\n".join(f"- {fix.detail}" for fix in check.fixes))
+    st.dataframe(compat.preview_fixes(df, check.fixes), hide_index=True)
+    st.caption("Preview of affected columns. The changes apply only to this session's copy of the upload; "
+               "your file is not modified.")
+    if not st.checkbox("Apply these changes and continue", key=f"compat_confirm_{digest}"):
+        st.info("Nothing has been changed. Confirm the proposed changes above to score this file.")
+        return None, False
+    fixed = compat.apply_fixes(df, check.fixes)
+    recheck = compat.check_compatibility(fixed, ctx.schema)
+    if recheck.status != compat.READY:
+        st.error("**The file is still not ready after these changes.** " + " ".join(recheck.problems))
+        return None, False
+    return fixed, True
 
 
 def _render_batch(ctx: DashboardContext, batch: dict) -> None:

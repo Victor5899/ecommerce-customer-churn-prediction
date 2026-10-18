@@ -192,6 +192,35 @@ def read_uploaded_table(source, filename: str, sheet_name: Optional[str] = None)
     return df.reset_index(drop=True)
 
 
+def read_column_names(source, filename: str, sheet_name: Optional[str] = None) -> list[str]:
+    """Header row as written (stripped), before pandas renames repeated names to 'X.1'.
+
+    Returns an empty list if the header cannot be read; ``read_uploaded_table``
+    reports the actual error.
+    """
+    ext = file_extension(filename)
+    try:
+        if ext == ".csv":
+            header = None
+            for encoding in ("utf-8-sig", "latin-1"):
+                try:
+                    header = pd.read_csv(_as_buffer(source), header=None, nrows=1, dtype=str,
+                                         encoding=encoding)
+                    break
+                except UnicodeDecodeError:
+                    continue
+        elif ext == ".xlsx":
+            header = pd.read_excel(_as_buffer(source), sheet_name=sheet_name if sheet_name is not None else 0,
+                                   header=None, nrows=1, dtype=str)
+        else:
+            return []
+    except Exception:
+        return []
+    if header is None or header.empty:
+        return []
+    return ["" if pd.isna(v) else str(v).strip() for v in header.iloc[0]]
+
+
 def _read_csv(source) -> pd.DataFrame:
     last_error = None
     for encoding in ("utf-8-sig", "latin-1"):
@@ -250,6 +279,28 @@ def _row_list(mask: pd.Series, limit: int = 5) -> str:
     return ", ".join(str(r) for r in rows)
 
 
+def coerce_numeric(values: pd.Series, col: str) -> tuple[Optional[pd.Series], Optional[str]]:
+    """Return ``(float values, None)``, or ``(None, problem)`` if the column is not numeric.
+
+    Blank strings count as missing; nothing else is converted or filled in.
+    """
+    original = values
+    if original.dtype == object:
+        original = original.replace(r"^\s*$", np.nan, regex=True)
+    if pd.api.types.is_bool_dtype(original):
+        return None, f"'{col}' contains true/false values; a number is required."
+    coerced = pd.to_numeric(original, errors="coerce")
+    invalid = original.notna() & coerced.isna()
+    if invalid.any():
+        examples = ", ".join(repr(v) for v in pd.unique(original[invalid])[:3])
+        return None, (f"'{col}' has {int(invalid.sum())} non-numeric value(s) (e.g. {examples}) "
+                      f"in row(s) {_row_list(invalid)}.")
+    infinite = np.isinf(coerced.astype(float))
+    if infinite.any():
+        return None, f"'{col}' has infinite value(s) in row(s) {_row_list(infinite)}."
+    return coerced.astype(float), None
+
+
 def prepare_features(df: pd.DataFrame, schema: FeatureSchema) -> tuple[pd.DataFrame, ValidationReport]:
     """Validate an uploaded table and return model-ready features in training column order.
 
@@ -278,26 +329,11 @@ def prepare_features(df: pd.DataFrame, schema: FeatureSchema) -> tuple[pd.DataFr
     X = df[schema.features].copy()
     problems = []
     for col in schema.numeric:
-        original = X[col]
-        if original.dtype == object:
-            original = original.replace(r"^\s*$", np.nan, regex=True)
-        if pd.api.types.is_bool_dtype(original):
-            problems.append(f"'{col}' contains true/false values; a number is required.")
+        coerced, problem = coerce_numeric(X[col], col)
+        if problem:
+            problems.append(problem)
             continue
-        coerced = pd.to_numeric(original, errors="coerce")
-        invalid = original.notna() & coerced.isna()
-        if invalid.any():
-            examples = ", ".join(repr(v) for v in pd.unique(original[invalid])[:3])
-            problems.append(
-                f"'{col}' has {int(invalid.sum())} non-numeric value(s) (e.g. {examples}) "
-                f"in row(s) {_row_list(invalid)}."
-            )
-            continue
-        infinite = np.isinf(coerced.astype(float))
-        if infinite.any():
-            problems.append(f"'{col}' has infinite value(s) in row(s) {_row_list(infinite)}.")
-            continue
-        X[col] = coerced.astype(float)
+        X[col] = coerced
 
     if problems:
         raise DataValidationError("Invalid numeric data. " + " ".join(problems))

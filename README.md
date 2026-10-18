@@ -171,6 +171,33 @@ The dashboard scores a **batch** of customers from an uploaded file. It has no s
 - Risk bands are for presentation only. By default the Medium band starts at the decision threshold, and moving the boundaries never changes `Churn Prediction`.
 - The last scored batch stays available on the other pages for the rest of the browser session.
 
+### Dataset compatibility checker
+
+Before scoring, every upload is checked against the model's 18 required input features (`src/compatibility.py`) and given one of three statuses:
+
+| Status | Meaning | What happens |
+|---|---|---|
+| **Ready to score** | Every required column is present with usable values | Scoring works exactly as before |
+| **Needs mapping/preprocessing** | Safe changes would make the file scorable | The changes are listed with a before/after preview. Nothing is applied until you tick **Apply these changes and continue**. Only the session copy changes, never your file |
+| **Incompatible** | Required columns are missing, ambiguous, duplicated or have invalid values | The reasons are shown and scoring is blocked |
+
+**Checks performed:**
+- **Columns:** required columns that are missing, extra columns, and duplicate columns. Duplicates are detected from the raw header, because pandas would otherwise rename a repeated `Tenure` to `Tenure.1`. A duplicated model, `CustomerID` or `Churn` column blocks scoring; a duplicated extra column only produces a warning.
+- **Values:** non-numeric, infinite or true/false values in numeric features, and categories not seen in training.
+- **Data quality:** missing values, columns with no values at all, rows with no feature values, negative values, exact duplicate rows, and missing or duplicated `CustomerID`s.
+
+**Changes that may be proposed (all of them need your confirmation):**
+- *Renames* where the name differs from a required column only in capitalisation, spacing or punctuation (for example `tenure`, `Days Since Last Order`, `customer_id`), or is a listed spelling variant of the same feature (for example `PreferredOrderCat` for the dataset's `PreferedOrderCat`, or `NumberOfAddresses`).
+- *Yes/No* or *True/False* text converted to 1/0 in the binary `Complain` and `Churn` columns. Missing values stay missing.
+- *Category capitalisation*, for example `mobile phone` matched to the known `Mobile Phone`.
+
+`Churn` is optional. If it is a complete 0/1 column, it is used only to report actual churn in the file. If it is incomplete or has other values, you get a warning and it is ignored. It is never a prediction input.
+
+**Not proposed, by design:**
+- Columns with different names are never matched just because the names look similar. `Tenures` or `MonthsAsCustomer` are not mapped to `Tenure`, and `Complaint` is not mapped to `Complain`, because the name alone does not show that the data is the same. Similar names are shown as hints only.
+- Number formats are not guessed. `1,234.5` could use either a thousands or a decimal separator.
+- Missing required columns are never filled in. Partially missing values are imputed by the fitted pipeline, as before.
+
 The model, metadata and historical dataset are cached (`st.cache_resource` / `st.cache_data`) and reloaded only when their files change. Uploaded files are parsed once per content hash.
 
 ### Screenshot checklist
@@ -221,6 +248,7 @@ ecommerce-customer-churn-prediction
 │   ├── calibration.py         Calibrators, Brier/log loss/reliability, calibration artifact checks
 │   ├── explain_calibrate.py   Builds the explainability and calibration artifacts (no retraining)
 │   ├── retention.py           Retention planning rules: bands, suggestions, ranking, budgets, scenarios
+│   ├── compatibility.py       Upload compatibility checker and confirmed, previewed fixes
 │   └── train_models.py        Training, model selection, threshold tuning, evaluation, artifacts
 │
 ├── tests                      pytest suite (synthetic fixtures + dashboard smoke tests)
@@ -398,6 +426,7 @@ Calibrated probabilities are shown when the validated calibrator is loaded. They
 - The random split assumes rows are independent snapshots; no time-based validation is possible because the dataset has no dates.
 - No REST API, database, authentication, deployment, monitoring or automated retraining.
 - Retention suggestions are fixed heuristic rules on four observed features. They have not been tested as treatments, and the planner does not estimate retained customers, revenue, customer lifetime value or uplift. Costs and budgets are user assumptions.
+- The compatibility checker recognises only formatting differences and a short list of spelling variants of the training column names. Other schemas must be renamed by hand, and unit or scale differences (for example tenure in days instead of months) cannot be detected.
 - Retention plans exist only in the browser session. Without a unique `CustomerID`, rows can be identified only by their position in the uploaded file.
 
 ---

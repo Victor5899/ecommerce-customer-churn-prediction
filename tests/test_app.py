@@ -70,6 +70,7 @@ def test_original_workbook_upload_and_prediction():
     at = run_with_upload(DATASET, DATASET.name)
     assert not at.exception and not at.error
     assert "Using sheet 'E Comm'" in texts(at.caption)
+    assert "Compatibility: Ready to score" in texts(at.success)
 
     at.button[0].click().run()
     assert not at.exception and not at.error
@@ -118,6 +119,23 @@ def test_missing_columns_show_streamlit_error(tmp_path):
     assert not at.exception
     assert "Missing required column" in texts(at.error)
     assert len(at.button) == 0
+
+
+@pytest.mark.skipif(not DATASET.exists(), reason="original workbook not found")
+def test_mapped_upload_requires_confirmation_before_scoring(tmp_path):
+    path = tmp_path / "renamed.csv"
+    pd.read_excel(DATASET, sheet_name="E Comm").head(40).rename(
+        columns={"Tenure": "tenure", "DaySinceLastOrder": "Days Since Last Order"}).to_csv(path, index=False)
+    at = run_with_upload(path, path.name)
+    assert not at.exception and not at.error
+    assert "Needs mapping/preprocessing" in texts(at.warning)
+    assert len(at.button) == 0 and len(at.checkbox) == 1
+
+    at.checkbox[0].check().run()
+    assert not at.exception and not at.error
+    at.button[0].click().run()
+    assert not at.exception and not at.error
+    assert {m.label: m.value for m in at.metric}["Customers scored"] == "40"
 
 
 def test_unreadable_file_shows_streamlit_error(tmp_path):
